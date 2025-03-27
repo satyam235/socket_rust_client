@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: write
+  pull-requests: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -43,6 +47,8 @@ jobs:
   create-release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
@@ -51,21 +57,10 @@ jobs:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
     
-    - name: Create tag
-      id: create_tag
-      run: |
-        timestamp=$(date +'%Y%m%d%H%M%S')
-        tag_name="v0.1.0-${timestamp}"
-        echo "TAG_NAME=${tag_name}" >> $GITHUB_OUTPUT
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        git tag ${tag_name}
-        git push origin ${tag_name}
-    
-    - name: Create GitHub Release
+    - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         files: rust-socket-agent-linux-x86_64
-        tag_name: ${{ steps.create_tag.outputs.TAG_NAME }}
+        tag_name: v0.1.0-${{ github.sha }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
