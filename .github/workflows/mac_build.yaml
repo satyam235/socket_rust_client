@@ -1,0 +1,122 @@
+name: Build macOS ARM & Intel
+
+on: [push, pull_request]
+
+jobs:
+  mac-arm64:
+    runs-on: macos-14-arm  # Ensure this runner is set up for Apple Silicon (ARM64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check OS and Architecture
+        run: |
+          uname -a
+          uname -m
+
+      - name: Install System Dependencies
+        run: |
+          brew install openssl@1.1
+          echo "export PATH=\"/opt/homebrew/opt/openssl@1.1/bin:$PATH\"" >> ~/.zshrc
+          echo "export LDFLAGS=\"-L/opt/homebrew/opt/openssl@1.1/lib\"" >> ~/.zshrc
+          echo "export CPPFLAGS=\"-I/opt/homebrew/opt/openssl@1.1/include\"" >> ~/.zshrc
+          source ~/.zshrc
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: aarch64-apple-darwin
+          default: true
+
+      - name: Build OpenSSL
+        run: |
+          wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
+          tar zxf openssl-1.1.1e.tar.gz
+          cd openssl-1.1.1e
+          ./Configure darwin64-arm64-cc --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e -static
+          make -j$(sysctl -n hw.logicalcpu)
+          make install
+          file /opt/openssl-1.1.1e/bin/openssl
+
+      - name: Build Binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+        env:
+          OPENSSL_STATIC: 1
+          OPENSSL_DIR: /opt/openssl-1.1.1e
+          OPENSSL_INCLUDE_DIR: /opt/openssl-1.1.1e/include
+          OPENSSL_LIB_DIR: /opt/openssl-1.1.1e/lib
+          PKG_CONFIG_PATH: /opt/openssl-1.1.1e/lib/pkgconfig
+
+      - name: Optimize and Package Binary
+        run: |
+          cd target/aarch64-apple-darwin/release
+          strip socketio_example
+          chmod +x socketio_example
+          tar -czvf socketio_example-mac-arm64.tar.gz socketio_example
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: socketio_example-mac-arm64
+          path: target/aarch64-apple-darwin/release/socketio_example-mac-arm64.tar.gz
+
+  mac-x86_64:
+    runs-on: macos-14-intel  # Ensure this runner is set up for macOS Intel (x86_64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check OS and Architecture
+        run: |
+          uname -a
+          uname -m
+
+      - name: Install System Dependencies
+        run: |
+          brew install openssl@1.1
+          echo "export PATH=\"/usr/local/opt/openssl@1.1/bin:$PATH\"" >> ~/.zshrc
+          echo "export LDFLAGS=\"-L/usr/local/opt/openssl@1.1/lib\"" >> ~/.zshrc
+          echo "export CPPFLAGS=\"-I/usr/local/opt/openssl@1.1/include\"" >> ~/.zshrc
+          source ~/.zshrc
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: x86_64-apple-darwin
+          default: true
+
+      - name: Build OpenSSL
+        run: |
+          wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
+          tar zxf openssl-1.1.1e.tar.gz
+          cd openssl-1.1.1e
+          ./Configure darwin64-x86_64-cc --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e -static
+          make -j$(sysctl -n hw.logicalcpu)
+          make install
+          file /opt/openssl-1.1.1e/bin/openssl
+
+      - name: Build Binary
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+        env:
+          OPENSSL_STATIC: 1
+          OPENSSL_DIR: /opt/openssl-1.1.1e
+          OPENSSL_INCLUDE_DIR: /opt/openssl-1.1.1e/include
+          OPENSSL_LIB_DIR: /opt/openssl-1.1.1e/lib
+          PKG_CONFIG_PATH: /opt/openssl-1.1.1e/lib/pkgconfig
+
+      - name: Optimize and Package Binary
+        run: |
+          cd target/x86_64-apple-darwin/release
+          strip socketio_example
+          chmod +x socketio_example
+          tar -czvf socketio_example-mac-x86_64.tar.gz socketio_example
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: socketio_example-mac-x86_64
+          path: target/x86_64-apple-darwin/release/socketio_example-mac-x86_64.tar.gz
