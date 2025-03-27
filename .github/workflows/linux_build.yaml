@@ -1,3 +1,9 @@
+name: linux-build
+on:
+  push:
+    branches: [ main ]
+
+
 jobs:
   build:
     strategy:
