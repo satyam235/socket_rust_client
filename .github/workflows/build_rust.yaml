@@ -1,7 +1,7 @@
 name: release-binaries
 on:
-  release:
-    types: [published]
+  push:
+    branches: [ main ]
 
 jobs:
   linux-x86_64:
@@ -22,13 +22,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools musl-dev
 
-      - name: Install cross
-        run: |
-          cargo install cross --force
-
       - name: Build binary
         run: |
-          cross build --release --target x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
 
@@ -44,15 +40,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          asset_name: naru-${{ github.event.release.tag_name }}-linux-x86_64.tar.gz
-          asset_path: target/x86_64-unknown-linux-musl/release/naru-linux-x86_64.tar.gz
           upload_url: ${{ github.event.release.upload_url }}
+          asset_path: target/x86_64-unknown-linux-musl/release/naru-linux-x86_64.tar.gz
+          asset_name: naru-${{ github.event.release.tag_name }}-linux-x86_64.tar.gz
+          asset_content_type: application/gzip
 
   macos-x86_64:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
@@ -75,15 +74,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          asset_name: naru-${{ github.event.release.tag_name }}-macos-x86_64.dmg
-          asset_path: target/release/naru.dmg
           upload_url: ${{ github.event.release.upload_url }}
+          asset_path: target/release/naru.dmg
+          asset_name: naru-${{ github.event.release.tag_name }}-macos-x86_64.dmg
+          asset_content_type: application/x-apple-diskimage
 
   windows-x86_64:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
@@ -100,6 +102,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          asset_name: naru-${{ github.event.release.tag_name }}-windows-x86_64.zip
-          asset_path: target/release/naru-windows-x86_64.zip
           upload_url: ${{ github.event.release.upload_url }}
+          asset_path: target/release/naru-windows-x86_64.zip
+          asset_name: naru-${{ github.event.release.tag_name }}-windows-x86_64.zip
+          asset_content_type: application/zip
