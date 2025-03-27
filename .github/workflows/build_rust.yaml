@@ -63,14 +63,14 @@ jobs:
       - name: Optimize and package binary
         run: |
           cd target/x86_64-unknown-linux-musl/release
-          strip naru
-          chmod +x naru
-          tar -czvf naru-linux-x86_64.tar.gz naru
+          strip socketio_example
+          chmod +x socketio_example
+          tar -czvf socketio_example-linux-x86_64.tar.gz socketio_example
 
       - name: Upload binary
         run: |
           gh release upload ${{ github.event.release.tag_name }} \
-            target/x86_64-unknown-linux-musl/release/naru-linux-x86_64.tar.gz
+            target/x86_64-unknown-linux-musl/release/socketio_example-linux-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -92,11 +92,11 @@ jobs:
       - name: Optimize and package binary
         run: |
           cd target/release
-          strip naru
-          chmod +x naru
+          strip socketio_example
+          chmod +x socketio_example
           mkdir dmg
-          mv naru dmg/
-          hdiutil create -fs HFS+ -srcfolder dmg -volname naru naru.dmg
+          mv socketio_example dmg/
+          hdiutil create -fs HFS+ -srcfolder dmg -volname socketio_example socketio_example.dmg
 
       - name: Upload binary
         uses: actions/upload-release-asset@v1
@@ -104,8 +104,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: target/release/naru.dmg
-          asset_name: naru-${{ github.event.release.tag_name }}-macos-x86_64.dmg
+          asset_path: target/release/socketio_example.dmg
+          asset_name: socketio_example-${{ github.event.release.tag_name }}-macos-x86_64.dmg
           asset_content_type: application/x-apple-diskimage
 
   windows-x86_64:
@@ -124,7 +124,7 @@ jobs:
         run: cargo build --release
       
       - name: Create ZIP archive
-        run: Compress-Archive -Path target/release/naru.exe -DestinationPath target/release/naru-windows-x86_64.zip
+        run: Compress-Archive -Path target/release/socketio_example.exe -DestinationPath target/release/socketio_example-windows-x86_64.zip
 
       - name: Upload binary
         uses: actions/upload-release-asset@v1
@@ -132,6 +132,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: target/release/naru-windows-x86_64.zip
-          asset_name: naru-${{ github.event.release.tag_name }}-windows-x86_64.zip
+          asset_path: target/release/socketio_example-windows-x86_64.zip
+          asset_name: socketio_example-${{ github.event.release.tag_name }}-windows-x86_64.zip
           asset_content_type: application/zip
