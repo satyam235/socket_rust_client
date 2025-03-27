@@ -19,7 +19,7 @@ jobs:
             wget \
             build-essential \
             linux-libc-dev \
-            linux-headers-$(uname -r)
+            linux-headers-$(uname -r) \
             gcc-aarch64-linux-gnu \
             crossbuild-essential-arm64
 
