@@ -62,12 +62,13 @@ jobs:
       run: |
         ls -la
         find . -name "rust-socket-agent-linux-x86_64"
-        cp rust-socket-agent-linux-x86_64/rust-socket-agent-linux-x86_64 .
+        cp rust-socket-agent-linux-x86_64/rust-socket-agent-linux-x86_64 ./socketio_example
+        chmod +x ./socketio_example
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        files: rust-socket-agent-linux-x86_64
+        files: socketio_example
         tag_name: v0.1.0-${{ github.sha }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
