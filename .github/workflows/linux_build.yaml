@@ -1,0 +1,71 @@
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        arch: [x86_64, aarch64]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            musl-tools \
+            musl-dev \
+            libssl-dev \
+            pkg-config \
+            wget \
+            build-essential \
+            gcc-aarch64-linux-gnu
+
+      - name: Install Dependencies (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.arch == 'x86_64' && (runner.os == 'Linux' && 'x86_64-unknown-linux-musl' || 'x86_64-apple-darwin') || (runner.os == 'Linux' && 'aarch64-unknown-linux-musl' || 'aarch64-apple-darwin') }}
+          default: true
+
+      - name: Set Environment Variables (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "OPENSSL_DIR=/usr/local/musl" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/local/musl/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/local/musl/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/local/musl/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Set Environment Variables (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          echo "OPENSSL_DIR=$(brew --prefix openssl)" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl)/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl)/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl)/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Build Binary
+        run: |
+          cargo build --release --target ${{ matrix.arch == 'x86_64' && (runner.os == 'Linux' && 'x86_64-unknown-linux-musl' || 'x86_64-apple-darwin') || (runner.os == 'Linux' && 'aarch64-unknown-linux-musl' || 'aarch64-apple-darwin') }}
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          OPENSSL_STATIC: 1
+
+      - name: Optimize and Package Binary
+        run: |
+          cd target/${{ matrix.arch == 'x86_64' && (runner.os == 'Linux' && 'x86_64-unknown-linux-musl' || 'x86_64-apple-darwin') || (runner.os == 'Linux' && 'aarch64-unknown-linux-musl' || 'aarch64-apple-darwin') }}/release
+          strip socketio_example || true
+          chmod +x socketio_example
+          tar -czvf socketio_example-${{ runner.os }}-${{ matrix.arch }}.tar.gz socketio_example
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: socketio_example-${{ runner.os }}-${{ matrix.arch }}
+          path: target/${{ matrix.arch == 'x86_64' && (runner.os == 'Linux' && 'x86_64-unknown-linux-musl' || 'x86_64-apple-darwin') || (runner.os == 'Linux' && 'aarch64-unknown-linux-musl' || 'aarch64-apple-darwin') }}/release/socketio_example-${{ runner.os }}-${{ matrix.arch }}.tar.gz
