@@ -19,13 +19,18 @@ jobs:
           musl-tools \
           musl-dev \
           build-essential \
-          perl
+          perl \
+          linux-headers-generic \
+          linux-libc-dev
 
     - name: Download and Build OpenSSL
       run: |
         wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
         tar xzf openssl-1.1.1w.tar.gz
         cd openssl-1.1.1w
+        
+        # Remove problematic include
+        sed -i '/#include <linux\/mman.h>/d' crypto/mem_sec.c
         
         # Configure for musl
         ./Configure \
