@@ -73,40 +73,48 @@ jobs:
           name: socketio_example-linux-x86_64
           path: target/x86_64-unknown-linux-musl/release/socketio_example-linux-x86_64.tar.gz
 
-
-  macos-x86_64:
+    macos-x86_64:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Install Dependencies
+        run: |
+          brew install openssl
+
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
           default: true
-      
-      - name: Build binary
+
+      - name: Set Environment Variables
+        run: |
+          echo "OPENSSL_DIR=$(brew --prefix openssl)" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl)/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl)/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl)/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Build Binary
         run: cargo build --release
-      
-      - name: Optimize and package binary
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          OPENSSL_STATIC: 1
+
+      - name: Optimize and Package Binary
         run: |
           cd target/release
           strip socketio_example
           chmod +x socketio_example
-          mkdir dmg
-          mv socketio_example dmg/
-          hdiutil create -fs HFS+ -srcfolder dmg -volname socketio_example socketio_example.dmg
+          tar -czvf socketio_example-macos-x86_64.tar.gz socketio_example
 
-      - name: Upload binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: target/release/socketio_example.dmg
-          asset_name: socketio_example-${{ github.event.release.tag_name }}-macos-x86_64.dmg
-          asset_content_type: application/x-apple-diskimage
+          name: socketio_example-macos-x86_64
+          path: target/release/socketio_example-macos-x86_64.tar.gz
+
 
   windows-x86_64:
     runs-on: windows-latest
