@@ -29,17 +29,17 @@ jobs:
           target: aarch64-apple-darwin
           default: true
 
-      - name: Build OpenSSL
-        run: |
-          wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
-          tar zxf openssl-1.1.1e.tar.gz
-          cd openssl-1.1.1e
+      # - name: Build OpenSSL
+      #   run: |
+      #     wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
+      #     tar zxf openssl-1.1.1e.tar.gz
+      #     cd openssl-1.1.1e
 
-          ./config no-shared no-asm --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e
-          make -j$(nproc)
-          make install
+      #     ./config no-shared no-asm --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e
+      #     make -j$(nproc)
+      #     make install
 
-          file /opt/openssl-1.1.1e/bin/openssl
+      #     file /opt/openssl-1.1.1e/bin/openssl
 
 
       - name: Build Binary
@@ -91,15 +91,15 @@ jobs:
           target: x86_64-apple-darwin
           default: true
 
-      - name: Build OpenSSL
-        run: |
-          wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
-          tar zxf openssl-1.1.1e.tar.gz
-          cd openssl-1.1.1e
-          ./Configure darwin64-x86_64-cc --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e -static
-          make -j$(sysctl -n hw.logicalcpu)
-          make install
-          file /opt/openssl-1.1.1e/bin/openssl
+      # - name: Build OpenSSL
+      #   run: |
+      #     wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
+      #     tar zxf openssl-1.1.1e.tar.gz
+      #     cd openssl-1.1.1e
+      #     ./Configure darwin64-x86_64-cc --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e -static
+      #     make -j$(sysctl -n hw.logicalcpu)
+      #     make install
+      #     file /opt/openssl-1.1.1e/bin/openssl
 
       - name: Build Binary
         run: |
