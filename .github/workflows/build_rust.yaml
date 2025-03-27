@@ -1,4 +1,4 @@
-name: Rust Static Musl Build with OpenSSL
+name: Rust Musl Static Build
 
 on:
   push:
@@ -12,6 +12,37 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          musl-tools \
+          musl-dev \
+          build-essential \
+          perl
+
+    - name: Download and Build OpenSSL
+      run: |
+        wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+        tar xzf openssl-1.1.1w.tar.gz
+        cd openssl-1.1.1w
+        
+        # Configure for musl
+        ./Configure \
+          -static \
+          no-shared \
+          no-zlib \
+          no-async \
+          no-engine \
+          no-comp \
+          linux-x86_64 \
+          --prefix=/usr/local/musl \
+          --openssldir=/usr/local/musl/openssl
+        
+        make clean
+        make CC=musl-gcc
+        sudo make install_sw
+
     - name: Install Rust
       uses: actions-rs/toolchain@v1
       with:
@@ -19,42 +50,9 @@ jobs:
         target: x86_64-unknown-linux-musl
         override: true
 
-    - name: Install musl tools and OpenSSL dependencies
+    - name: Set OpenSSL environment
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          musl-tools \
-          musl-dev \
-          libssl-dev \
-          pkg-config
-
-    - name: Download OpenSSL
-      run: |
-        wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-        tar xzf openssl-1.1.1w.tar.gz
-
-    - name: Build OpenSSL for musl
-      run: |
-        cd openssl-1.1.1w
-        ./Configure \
-          no-shared \
-          no-zlib \
-          no-async \
-          no-comp \
-          no-idea \
-          no-mdc2 \
-          no-rc5 \
-          no-ec2m \
-          no-err \
-          no-ssl3 \
-          no-tls \
-          no-psk \
-          linux-x86_64-musl
-        make -j$(nproc)
-
-    - name: Set OpenSSL environment variables
-      run: |
-        echo "OPENSSL_DIR=$(pwd)/openssl-1.1.1w" >> $GITHUB_ENV
+        echo "OPENSSL_DIR=/usr/local/musl" >> $GITHUB_ENV
         echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
         echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
 
