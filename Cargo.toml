@@ -1,0 +1,10 @@
+[package]
+name = "socketio_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rust_socketio = "*"
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+reqwest = "*"
