@@ -22,7 +22,6 @@ jobs:
             libssl-dev \
             pkg-config \
             wget \
-            purl \
             build-essential \
             linux-libc-dev \
             linux-headers-$(uname -r) \
