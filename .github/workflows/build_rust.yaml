@@ -20,7 +20,26 @@ jobs:
       - name: Install musl tools and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools musl-dev libssl-dev pkg-config
+          sudo apt-get install -y musl-tools musl-dev libssl-dev pkg-config wget build-essential
+
+      - name: Download and Compile OpenSSL for musl
+        run: |
+          # Download OpenSSL
+          wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+          tar xzf openssl-1.1.1w.tar.gz
+          cd openssl-1.1.1w
+
+          # Configure and compile for musl
+          CC="musl-gcc" ./Configure no-shared no-async --prefix=/usr/local/musl --openssldir=/usr/local/musl linux-x86_64
+          make -j$(nproc)
+          sudo make install_sw
+
+          # Create necessary symlinks and directories
+          sudo mkdir -p /usr/local/musl/include
+          sudo mkdir -p /usr/local/musl/lib
+          sudo ln -sf /usr/local/musl/include/openssl /usr/local/musl/include/
+          sudo ln -sf /usr/local/musl/lib/libssl.a /usr/lib/x86_64-linux-musl/libssl.a
+          sudo ln -sf /usr/local/musl/lib/libcrypto.a /usr/lib/x86_64-linux-musl/libcrypto.a
 
       - name: Build binary
         run: |
@@ -29,6 +48,8 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static"
           OPENSSL_STATIC: 1
           OPENSSL_DIR: /usr/local/musl
+          OPENSSL_INCLUDE_DIR: /usr/local/musl/include
+          OPENSSL_LIB_DIR: /usr/local/musl/lib
           PKG_CONFIG_ALLOW_CROSS: 1
           PKG_CONFIG_PATH: /usr/local/musl/lib/pkgconfig
 
