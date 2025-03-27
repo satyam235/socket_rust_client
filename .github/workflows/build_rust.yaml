@@ -1,4 +1,4 @@
-name: Rust Linux x86_64 Static Build
+name: Rust Static Musl Build with OpenSSL
 
 on:
   push:
@@ -6,18 +6,9 @@ on:
   pull_request:
     branches: [ main ]
 
-permissions:
-  contents: write
-  pull-requests: read
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   build:
-    name: Build Static Binary on Linux x86_64
     runs-on: ubuntu-latest
-    
     steps:
     - uses: actions/checkout@v4
 
@@ -27,36 +18,56 @@ jobs:
         toolchain: stable
         target: x86_64-unknown-linux-musl
         override: true
-        components: rustfmt, clippy
 
-    - name: Install musl tools
+    - name: Install musl tools and OpenSSL dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y musl-tools musl-dev
+        sudo apt-get install -y \
+          musl-tools \
+          musl-dev \
+          libssl-dev \
+          pkg-config
 
-    - name: Cache cargo dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Create .cargo/config.toml for static linking
+    - name: Download OpenSSL
       run: |
-        mkdir -p .cargo
-        echo '[target.x86_64-unknown-linux-musl]' > .cargo/config.toml
-        echo 'linker = "musl-gcc"' >> .cargo/config.toml
-        echo 'rustflags = ["-C", "target-feature=+crt-static"]' >> .cargo/config.toml
+        wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+        tar xzf openssl-1.1.1w.tar.gz
 
-    - name: Build Static Binary
+    - name: Build OpenSSL for musl
       run: |
-        RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-musl
+        cd openssl-1.1.1w
+        ./Configure \
+          no-shared \
+          no-zlib \
+          no-async \
+          no-comp \
+          no-idea \
+          no-mdc2 \
+          no-rc5 \
+          no-ec2m \
+          no-err \
+          no-ssl3 \
+          no-tls \
+          no-psk \
+          linux-x86_64-musl
+        make -j$(nproc)
+
+    - name: Set OpenSSL environment variables
+      run: |
+        echo "OPENSSL_DIR=$(pwd)/openssl-1.1.1w" >> $GITHUB_ENV
+        echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+        echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+
+    - name: Build static binary
+      run: |
+        RUSTFLAGS="-C target-feature=+crt-static" \
+        cargo build \
+          --release \
+          --target x86_64-unknown-linux-musl
 
     - name: Prepare artifact
       run: |
-        cp target/x86_64-unknown-linux-musl/release/socketio_example socketio_agent-linux-x86_64-static
+        cp target/x86_64-unknown-linux-musl/release/your_binary_name socketio_agent-linux-x86_64-static
         chmod +x socketio_agent-linux-x86_64-static
 
     - name: Upload artifact
@@ -64,31 +75,3 @@ jobs:
       with:
         name: socketio-agent-linux-x86_64-static
         path: socketio_agent-linux-x86_64-static
-        
-  create-release:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-
-    - name: List and prepare artifacts
-      run: |
-        ls -la
-        find . -name "socketio_agent-linux-x86_64-static"
-        cp socketio-agent-linux-x86_64-static/socketio_agent-linux-x86_64-static ./socketio_example
-        chmod +x ./socketio_example
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: socketio_example
-        tag_name: v0.1.0-${{ github.sha }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
