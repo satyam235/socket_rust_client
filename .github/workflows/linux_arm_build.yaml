@@ -45,6 +45,7 @@ jobs:
           echo "/usr/local/musl/lib" | sudo tee -a /etc/ld.so.conf.d/musl.conf
           sudo ldconfig
 
+
       - name: Build binary
         run: |
           cargo build --release --target aarch64-unknown-linux-musl
