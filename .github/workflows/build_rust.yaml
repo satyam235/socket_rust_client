@@ -9,6 +9,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            musl-tools \
+            musl-dev \
+            libssl-dev \
+            pkg-config \
+            wget \
+            build-essential \
+            linux-headers-generic \
+            linux-libc-dev
+
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -17,11 +30,6 @@ jobs:
           target: x86_64-unknown-linux-musl
           default: true
 
-      - name: Install musl tools and dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools musl-dev libssl-dev pkg-config wget build-essential
-
       - name: Download and Compile OpenSSL for musl
         run: |
           # Download OpenSSL
@@ -29,8 +37,18 @@ jobs:
           tar xzf openssl-1.1.1w.tar.gz
           cd openssl-1.1.1w
 
+          # Find kernel headers
+          KERNEL_HEADERS=$(ls -d /usr/src/linux-headers-* | tail -n 1)
+          echo "Using kernel headers from: $KERNEL_HEADERS"
+
           # Configure and compile for musl
-          CC="musl-gcc" ./Configure no-shared no-async --prefix=/usr/local/musl --openssldir=/usr/local/musl linux-x86_64
+          CC="musl-gcc" \
+          CFLAGS="-I$KERNEL_HEADERS/include" \
+          ./Configure no-shared no-async \
+            --prefix=/usr/local/musl \
+            --openssldir=/usr/local/musl \
+            linux-x86_64
+
           make -j$(nproc)
           sudo make install_sw
 
@@ -69,7 +87,7 @@ jobs:
           asset_path: target/x86_64-unknown-linux-musl/release/naru-linux-x86_64.tar.gz
           asset_name: naru-${{ github.event.release.tag_name }}-linux-x86_64.tar.gz
           asset_content_type: application/gzip
-
+  
   macos-x86_64:
     runs-on: macos-latest
     steps:
