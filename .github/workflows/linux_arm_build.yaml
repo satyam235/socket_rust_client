@@ -8,6 +8,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name : check os and arch
+        run: |
+          uname -a
+          uname -m
+
       - name: Install system dependencies 
         run: |
           sudo apt-get update
@@ -48,9 +53,6 @@ jobs:
           make install
 
           ls -gG /opt/openssl-1.1.1e/bin/
-          total 10828
-          -rwxr-xr-x 1     6214 Mar 23 23:27 c_rehash
-          -rwxr-xr-x 1 11077448 Mar 23 23:27 openssl
 
           file /opt/openssl-1.1.1e/bin/openssl
           /opt/openssl-1.1.1e/bin/openssl: ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux), statically linked, for GNU/Linux 3.7.0, with debug_info, not stripped
