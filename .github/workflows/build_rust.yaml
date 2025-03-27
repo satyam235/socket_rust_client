@@ -67,12 +67,12 @@ jobs:
           chmod +x socketio_example
           tar -czvf socketio_example-linux-x86_64.tar.gz socketio_example
 
-      - name: Upload binary
-        run: |
-          gh release upload ${{ github.event.release.tag_name }} \
-            target/x86_64-unknown-linux-musl/release/socketio_example-linux-x86_64.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: socketio_example-linux-x86_64
+          path: target/x86_64-unknown-linux-musl/release/socketio_example-linux-x86_64.tar.gz
+
 
   macos-x86_64:
     runs-on: macos-latest
