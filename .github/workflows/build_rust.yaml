@@ -41,7 +41,7 @@ jobs:
             artifact_name: rust-socket-agent-macos-arm64
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v3
 
     - name: Install Rust
       uses: actions-rs/toolchain@v1
@@ -60,7 +60,7 @@ jobs:
     # Windows ARM cross-compilation might require additional setup
     - name: Setup Windows ARM cross-compilation
       if: matrix.target == 'aarch64-pc-windows-msvc'
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v2
       with:
         dotnet-version: '6.0.x'
 
@@ -79,7 +79,7 @@ jobs:
         cp target/${{ matrix.target }}/release/$(find target/${{ matrix.target }}/release -maxdepth 1 -type f -executable -printf "%f\n" | head -n 1) ${{ matrix.artifact_name }}
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: ${{ matrix.artifact_name }}
         path: ${{ matrix.artifact_name }}
@@ -90,10 +90,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v3
     
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v3
     
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
