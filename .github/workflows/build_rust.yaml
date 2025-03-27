@@ -1,80 +1,109 @@
-name: Rust Musl Static Build
-
+name: release-binaries
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 jobs:
-  build:
+  linux-x86_64:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          default: true
+      
+      # Install musl tools for static linking
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          musl-tools \
-          musl-dev \
-          build-essential \
-          perl \
-          linux-headers-generic \
-          linux-libc-dev
+      - name: Build binary
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target x86_64-unknown-linux-musl
+          use-cross: true
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
 
-    - name: Download and Build OpenSSL
-      run: |
-        wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-        tar xzf openssl-1.1.1w.tar.gz
-        cd openssl-1.1.1w
-        
-        # Remove problematic include
-        sed -i '/#include <linux\/mman.h>/d' crypto/mem_sec.c
-        
-        # Configure for musl
-        ./Configure \
-          -static \
-          no-shared \
-          no-zlib \
-          no-async \
-          no-engine \
-          no-comp \
-          linux-x86_64 \
-          --prefix=/usr/local/musl \
-          --openssldir=/usr/local/musl/openssl
-        
-        make clean
-        make CC=musl-gcc
-        sudo make install_sw
+      - name: Optimize and package binary
+        run: |
+          cd target/x86_64-unknown-linux-musl/release
+          strip naru
+          chmod +x naru
+          tar -czvf naru-linux-x86_64.tar.gz naru
 
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        target: x86_64-unknown-linux-musl
-        override: true
+      - name: Upload binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          asset_name: naru-${{ github.event.release.tag_name }}-linux-x86_64.tar.gz
+          asset_path: target/x86_64-unknown-linux-musl/release/naru-linux-x86_64.tar.gz
+          upload_url: ${{ github.event.release.upload_url }}
 
-    - name: Set OpenSSL environment
-      run: |
-        echo "OPENSSL_DIR=/usr/local/musl" >> $GITHUB_ENV
-        echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
-        echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+  macos-x86_64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          default: true
+      
+      - name: Build binary
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release
+      
+      - name: Optimize and package binary
+        run: |
+          cd target/release
+          strip naru
+          chmod +x naru
+          mkdir dmg
+          mv naru dmg/
+          hdiutil create -fs HFS+ -srcfolder dmg -volname naru naru.dmg
 
-    - name: Build static binary
-      run: |
-        RUSTFLAGS="-C target-feature=+crt-static" \
-        cargo build \
-          --release \
-          --target x86_64-unknown-linux-musl
+      - name: Upload binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          asset_name: naru-${{ github.event.release.tag_name }}-macos-x86_64.dmg
+          asset_path: target/release/naru.dmg
+          upload_url: ${{ github.event.release.upload_url }}
 
-    - name: Prepare artifact
-      run: |
-        cp target/x86_64-unknown-linux-musl/release/your_binary_name socketio_agent-linux-x86_64-static
-        chmod +x socketio_agent-linux-x86_64-static
+  windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          default: true
+      
+      - name: Build binary
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release
+      
+      - name: Create ZIP archive
+        run: Compress-Archive -Path target/release/naru.exe -DestinationPath target/release/naru-windows-x86_64.zip
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: socketio-agent-linux-x86_64-static
-        path: socketio_agent-linux-x86_64-static
+      - name: Upload binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          asset_name: naru-${{ github.event.release.tag_name }}-windows-x86_64.zip
+          asset_path: target/release/naru-windows-x86_64.zip
+          upload_url: ${{ github.event.release.upload_url }}
