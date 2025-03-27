@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   mac-arm64:
-    runs-on: macos-14-arm  # Ensure this runner is set up for Apple Silicon (ARM64)
+    runs-on: macos-14  # Ensure this runner is set up for Apple Silicon (ARM64)
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +63,7 @@ jobs:
           path: target/aarch64-apple-darwin/release/socketio_example-mac-arm64.tar.gz
 
   mac-x86_64:
-    runs-on: macos-14-intel  # Ensure this runner is set up for macOS Intel (x86_64)
+    runs-on: macos-13  # Ensure this runner is set up for macOS Intel (x86_64)
     steps:
       - uses: actions/checkout@v4
 
