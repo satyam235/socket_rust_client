@@ -8,7 +8,7 @@ rust_socketio = "*"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 reqwest = "*"
-openssl = { version = "0.10", features = ["static"] }
+openssl = { version = "0.10", features = ["vendored"] }
 
 [package.metadata.cross.target.x86_64-unknown-linux-musl]
 pre-build = [
