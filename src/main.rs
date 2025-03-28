@@ -8,6 +8,8 @@ use chrono::{Local, NaiveTime, Utc};
 use std::collections::HashMap;
 use reqwest::{Client, Method, Error as ReqwestError};
 use serde_json::Value;
+use whoami::username;
+
 
 
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
@@ -39,43 +41,35 @@ fn print_version() {
 
 // Function to check for admin/root privileges
 #[cfg(target_os = "windows")]
-fn is_admin() -> bool {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::Authorization::{TOKEN_QUERY, TOKEN_ADJUST_PRIVILEGES};
-    use windows::Win32::System::Threading::{OpenProcessToken, GetCurrentProcess};
-    use windows::Win32::Security::Authorization::AllocateAndInitializeSid;
-    use windows::Win32::Security::Authorization::CheckTokenMembership;
+fn is_elevated() -> bool {
+    use std::process::Command;
 
-    unsafe {
-        let mut process_token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &mut process_token).is_ok() {
-            let mut admin_sid = std::mem::zeroed();
-            if AllocateAndInitializeSid(
-                &windows::Win32::Security::Authorization::SECURITY_NT_AUTHORITY,
-                2,
-                windows::Win32::Security::Authorization::SECURITY_BUILTIN_DOMAIN_RID,
-                windows::Win32::Security::Authorization::DOMAIN_ALIAS_RID_ADMINS,
-                0, 0, 0, 0, 0, 0,
-                &mut admin_sid
-            ).is_ok() {
-                let mut is_admin = false;
-                if CheckTokenMembership(process_token, admin_sid, &mut is_admin).is_ok() {
-                    return is_admin;
-                }
-            }
-        }
-        false
+    let output = Command::new("net")
+        .args(["session"])
+        .output()
+        .unwrap_or_else(|_| panic!("Failed to execute command"));
+
+   return  output.status.success()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_elevated() -> bool {
+    true // Assume non-Windows platforms have root check handled elsewhere.
+}
+
+#[cfg(unix)]
+fn is_admin() -> bool {
+    use nix::unistd::Uid;
+
+    let current_uid = Uid::current();
+
+    if !current_uid.is_root() {
+        return false;
+    } else {
+        return true
     }
-}
 
-#[cfg(target_os = "linux")]
-fn is_admin() -> bool {
-    unsafe { libc::geteuid() == 0 }
-}
 
-#[cfg(target_os = "macos")]
-fn is_admin() -> bool {
-    unsafe { libc::geteuid() == 0 }
 }
 
 // Key pair generation function
@@ -133,6 +127,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.contains(&"-V".to_string()) || args.contains(&"--version".to_string()) {
         print_version();
         process::exit(0);
+    }
+
+    if cfg!(target_os = "windows") {
+        if !is_elevated() {
+            println!("Please run this program with admin/root privileges");
+            // process::exit(1);
+        }
+    } else {
+        if !is_admin() {
+            println!("Please run this program with admin/root privileges");
+        }
     }
 
     // Check admin privileges
