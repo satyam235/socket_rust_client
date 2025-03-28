@@ -7,9 +7,6 @@ use reqwest::header::HeaderValue;
 use chrono::{Local, NaiveTime, Utc};
 use std::collections::HashMap;
 use reqwest::{Client, Method, Error as ReqwestError};
-use serde_json::Value;
-use whoami::username;
-
 
 
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
