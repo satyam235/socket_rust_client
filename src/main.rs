@@ -54,6 +54,11 @@ fn is_elevated() -> bool {
     true // Assume non-Windows platforms have root check handled elsewhere.
 }
 
+#[cfg(target_os = "windows")]
+fn is_admin() -> bool {
+    true
+}
+
 #[cfg(unix)]
 fn is_admin() -> bool {
     use nix::unistd::Uid;
