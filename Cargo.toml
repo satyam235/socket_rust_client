@@ -7,13 +7,18 @@ edition = "2021"
 chrono = "0.4"
 rsa = "0.9.6"
 rand = "0.8.5"
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = { version = "0.2", default-features = false }
 rust_socketio = "*"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 reqwest = "*"
 openssl = { version = "0.10", features = ["vendored"] }
+
+[package.metadata.cross.target.x86_64-unknown-linux-musl]
+pre-build = [
+    "apt-get update",
+    "apt-get install -y musl-tools musl-dev"
+]
+
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.52.0", features = [
@@ -22,8 +27,6 @@ windows = { version = "0.52.0", features = [
     "Win32_System_Threading"
 ] }
 
-[package.metadata.cross.target.x86_64-unknown-linux-musl]
-pre-build = [
-    "apt-get update",
-    "apt-get install -y musl-tools musl-dev"
-]
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", default-features = false }
+
