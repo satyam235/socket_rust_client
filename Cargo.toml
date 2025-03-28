@@ -4,11 +4,23 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = "0.4"
+rsa = "0.9.6"
+rand = "0.8.5"
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", default-features = false }
 rust_socketio = "*"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 reqwest = "*"
 openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading"
+] }
 
 [package.metadata.cross.target.x86_64-unknown-linux-musl]
 pre-build = [
