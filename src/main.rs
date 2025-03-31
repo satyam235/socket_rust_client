@@ -20,7 +20,10 @@ fn read_config() -> HashMap<String, String> {
     config.insert("agent_mode".to_string(), "ENDPOINT".to_string());
     config.insert("secops_jump_host".to_string(), "false".to_string());
 
-    if let Ok(contents) = fs::read_to_string(CONFIG_PATH) {
+    let config_path = get_config_file_path();
+    println!("Config Path: {}", config_path);
+
+    if let Ok(contents) = fs::read_to_string(config_path) {
         for line in contents.lines() {
             if let Some((key, value)) = line.split_once('=') {
                 config.insert(key.trim().to_string(), value.trim().to_string());
@@ -34,6 +37,23 @@ fn read_config() -> HashMap<String, String> {
 // Function to print version
 fn print_version() {
     println!("SecOps Agent Version: {}", VERSION);
+}
+
+fn get_config_file_path() -> String {
+    // Check if it is a windows system or not
+    if cfg!(target_os = "windows") {
+        // check if this file exists
+        if !(fs::read_to_string("C:\\Program Files (x86)\\Secops Solution CLI\\config.txt").is_err()) {
+            return "C:\\Program Files (x86)\\Secops Solution CLI\\secops_config.txt".to_string();
+        }
+        return "C:\\Program Files (x86)\\Secops Solution CLI\\config.txt".to_string();
+    } else {
+        // check if this file exists
+        if !(fs::read_to_string("/usr/local/bin/secops_config.txt").is_err()) {
+            return "/usr/local/bin/secops_config.txt".to_string();
+        }
+        return "/usr/local/bin/config.txt".to_string();
+    }
 }
 
 // Function to check for admin/root privileges
