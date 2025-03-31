@@ -1,5 +1,4 @@
 use rust_socketio::{ClientBuilder, Payload, RawClient};
-use serde_json::json;
 use std::fs::{remove_file, File};
 use std::{env, fs, process, time};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +6,6 @@ use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
 use reqwest::header::HeaderValue;
 use chrono::{Local, NaiveTime, Utc};
 use std::collections::HashMap;
-use reqwest::{Client, Method, Error as ReqwestError};
 use chrono::{DateTime, TimeZone};
 use std::io::{Read, Write}; 
 use std::sync::{RwLock};
@@ -19,6 +17,9 @@ use rsa::{pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding}, RsaPrivateKey,
 use rand::rngs::OsRng;
 use base64::{encode, decode};
 use sha2::Sha256;
+use reqwest::{blocking::Client, Method, Response, header};
+use serde_json::{Value, json};
+use std::error::Error;
 
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
 const CHECK_INTERVAL: u64 = 30;
@@ -32,25 +33,10 @@ pub struct log_type {
     warning: String,
 }
 
-
-fn generate_key_pair() -> Result<(RsaPrivateKey, RsaPublicKey), Box<dyn std::error::Error>> {
-    let mut rng = OsRng;
-    let bits = 2048;
-    let private_key = RsaPrivateKey::new(&mut rng, bits)?;
-    let public_key = RsaPublicKey::from(&private_key);
-    Ok((private_key, public_key))
-}
-
-fn encrypt_message(public_key: &RsaPublicKey, message: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let mut rng = OsRng;
-    let encrypted = public_key.encrypt(&mut rng, Oaep::new::<Sha256>(), message.as_bytes())?;
-    Ok(encode(&encrypted))
-}
-
-fn decrypt_message(private_key: &RsaPrivateKey, encrypted_message: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let encrypted_bytes = decode(encrypted_message)?;
-    let decrypted = private_key.decrypt(Oaep::new::<Sha256>(), &encrypted_bytes)?;
-    Ok(String::from_utf8(decrypted)?)
+struct LogEntry {
+    function_name: String,
+    log_type: String,
+    message: String,
 }
 
 
@@ -134,6 +120,73 @@ lazy_static::lazy_static! {
 lazy_static! {
     static ref CONFIG: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
 }
+
+fn generate_key_pair() -> Result<(RsaPrivateKey, RsaPublicKey), Box<dyn std::error::Error>> {
+    let mut rng = OsRng;
+    let bits = 2048;
+    let private_key = RsaPrivateKey::new(&mut rng, bits)?;
+    let public_key = RsaPublicKey::from(&private_key);
+    Ok((private_key, public_key))
+}
+
+fn encrypt_message(public_key: &RsaPublicKey, message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut rng = OsRng;
+    let encrypted = public_key.encrypt(&mut rng, Oaep::new::<Sha256>(), message.as_bytes())?;
+    Ok(encode(&encrypted))
+}
+
+fn decrypt_message(private_key: &RsaPrivateKey, encrypted_message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let encrypted_bytes = decode(encrypted_message)?;
+    let decrypted = private_key.decrypt(Oaep::new::<Sha256>(), &encrypted_bytes)?;
+    Ok(String::from_utf8(decrypted)?)
+}
+
+/// Function to make an HTTP request with GET or POST method
+fn send_request(
+    base_url: &str,
+    endpoint: &str,
+    params: Option<&[(&str, &str)]>,
+    payload: Option<&Value>,
+    method: Method
+) -> Result<Value, Box<dyn Error>> {
+    let client = Client::new();
+    let full_url = format!("{}{}", base_url, endpoint);
+    
+    let mut request_builder = client.request(method.clone(), &full_url);
+
+    request_builder = request_builder.header(header::CONTENT_TYPE, "application/json");
+
+    if params.is_none() && payload.is_none() {
+        request_builder = request_builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    
+    // if let Some(params) = params {
+    //     request_builder = request_builder.query(params);
+    // }
+
+    println!("Request URL: {}", full_url);
+    println!("Request Method: {}", method);
+    println!("Request Payload: {:#?}", payload);
+    
+    if let Some(payload) = payload {
+        let payload_str = serde_json::to_string(payload)?;
+        // let body = reqwest::Body::from(payload_str);
+        // let payload_str_cloned = payload_str.clone();
+        println!("Request Payload string: {}", payload_str);
+        request_builder = request_builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(payload_str);  // Convert to bytes explicitly
+    }
+    let response = request_builder.send()?;
+    let status = response.status();
+    let response_text = response.text()?;
+    
+    let json_response: Value = serde_json::from_str(&response_text).unwrap_or(json!({"error": "Invalid JSON response"}));
+    
+    println!("Status: {}", status);
+    Ok(json_response)
+}
+
 
 fn read_config(config_path: &str)  {
     let mut config = HashMap::new();
@@ -298,22 +351,40 @@ fn write_logs_to_file(log: &LogEntry) {
     }
 }
 
-// LogEntry struct to store log information
-
-struct LogEntry {
-    function_name: String,
-    log_type: String,
-    message: String,
-}
-
 
 fn create_log_entry(function_name: &str, log_type: String, message: &str) {
     let log_entry = LogEntry {
         function_name: function_name.to_string(),
-        log_type: log_type,
+        log_type: log_type.clone(),
         message: message.to_string(),
     };
     write_logs_to_file(&log_entry);
+
+    let endpoint = "agent/logging";
+    let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
+    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
+
+    let log_entry_json = json!({
+        "time": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "message": message.to_string(),
+        "function_name": function_name.to_string(),
+        "status": "SUCCESS",
+        "log_type": log_type,
+        "agent_id": agent_id
+    });
+
+    let log_entry_str = serde_json::to_string(&log_entry_json).unwrap();
+
+    let payload_data = json!({
+        "log_entry" :  log_entry_str
+    });
+    let payload = Some(&payload_data);
+
+    match send_request(&base_url, endpoint, None, payload, Method::POST) {
+        Ok(response) => println!("Response: {:?}", response),
+        Err(e) => eprintln!("Request failed: {}", e),
+    }
+
 }
 
 // Dummy function to get log file path
@@ -324,7 +395,7 @@ fn check_log_file() -> Option<String> {
 
 
 
-/******  c97a6765-7c31-485b-a105-8878b1479ae3  *******/fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = get_config_file_path();
     
     println!("Using Config File : {}", config_path);
