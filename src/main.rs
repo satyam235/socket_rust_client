@@ -1,4 +1,5 @@
-use rust_socketio::{ClientBuilder, Payload, RawClient};
+use rsa::pkcs8::der::asn1::Null;
+use rust_socketio::{client, ClientBuilder, Payload, RawClient};
 use std::fs::{remove_file, File};
 use std::{env, fs, process, time};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,28 +156,58 @@ fn get_private_key_pem() -> Option<String> {
 }
 
 
-fn encrypt_message(message: &str, public_key: &RsaPublicKey) -> Option<String> {
-    let mut rng = thread_rng();
+// fn encrypt_message(message: &str) -> Option<String> {
+//     let mut rng = thread_rng();
 
-    let encrypted_data = public_key.encrypt(
-        &mut rng,
-        Oaep::new::<Sha256>(), // ✅ Updated syntax
-        message.as_bytes(),
-    ).ok()?;
+//     let public_key = SERVER_PUBLIC_KEY.lock().unwrap().as_ref().ok_or("Public key not found").ok()?;
 
-    Some(base64::encode(encrypted_data))
+//     let encrypted_data = public_key.encrypt(
+//         &mut rng,
+//         Oaep::new::<Sha256>(), // ✅ Updated syntax
+//         message.as_bytes(),
+//     ).ok()?;
+
+//     Some(base64::encode(encrypted_data))
+// }
+
+fn decrypt_message(encrypted_message: &str) -> String {
+    let private_key_guard = SERVER_PRIVATE_KEY.lock().unwrap(); // Store MutexGuard
+
+    let private_key = match private_key_guard.as_ref() {
+        Some(key) => key,
+        None => {
+            eprintln!("Error: Private key not found");
+            return "Error: Private key not found".to_string();
+        }
+    };
+
+    let encrypted_data = match base64::decode(encrypted_message) {
+        Ok(data) => data,
+        Err(_) => {
+            eprintln!("Error: Failed to decode Base64");
+            return "Error: Failed to decode Base64".to_string();
+        }
+    };
+
+    let decrypted_data = match private_key.decrypt(Oaep::new::<Sha256>(), &encrypted_data) {
+        Ok(data) => data,
+        Err(_) => {
+            eprintln!("Error: Decryption failed");
+            return "Error: Decryption failed".to_string();
+        }
+    };
+
+    match String::from_utf8(decrypted_data) {
+        Ok(decoded_str) => decoded_str,
+        Err(_) => {
+            eprintln!("Error: Failed to convert decrypted data to UTF-8");
+            "Error: Failed to convert decrypted data to UTF-8".to_string()
+        }
+    }
 }
 
-fn decrypt_message(encrypted_message: &str, private_key: &RsaPrivateKey) -> Option<String> {
-    let encrypted_data = base64::decode(encrypted_message).ok()?;
-    
-    let decrypted_data = private_key.decrypt(
-        Oaep::new::<Sha256>(), // ✅ Updated syntax
-        &encrypted_data,
-    ).ok()?;
 
-    Some(String::from_utf8(decrypted_data).ok()?)
-}
+
 
 /// Function to make an HTTP request with GET or POST method
 fn send_request(
@@ -513,6 +544,7 @@ fn generate_and_share_server_keys() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = get_config_file_path();
     
@@ -564,7 +596,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     generate_and_share_server_keys();
 
+    let handle_task_event = move |message: Payload, _| {
+        println!("Task event received");
+        match message {
+            Payload::String(s) => {
+                println!("Task event received: {}", s);
+                let json_data: serde_json::Value = serde_json::from_str(&s).unwrap();
+                let task_id = json_data["task_id"].as_str().unwrap_or_default();
+                println!("Task ID: {}", task_id);   
+            }
+            Payload::Binary(_) => {
+                // Handle binary payload
+                println!("Task event received, binary type payload");
+            }
+            Payload::Text(t) => {
+                // Handle text payload
+                println!("Task event received, text type payload");
+                let mut cli_command: HashMap<String, Value> = HashMap::new();
+                let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
+
+                if let Ok(json_data) = serde_json::from_str::<Value>(&json_str) {
+                    println!("JSON data: {:#?}", json_data[0]);
+                    if let Some(obj) = json_data[0].as_object() {
+                        print!("JSON object: {:#?}\n", obj);
+                        for (key, value) in obj {
+                            print!("Attempting to decrypt key: {}\n", key);
+                            let decrypted_key = decrypt_message(key);
+                            print!("Decrypted key: {}\n", decrypted_key);
+                            if value.is_string() && !["jwt_token", "ssh_key", "script", "secops_binary_config", "asset_details"].contains(&decrypted_key.as_str()) {
+                                let decrypted_value = decrypt_message(&value.to_string());
+
+                                cli_command.insert(decrypted_key.to_string(), Value::String(decrypted_value));
+                            } else {
+                                cli_command.insert(decrypted_key, value.clone());
+                            }
+
+                        }
+                    }
+
+                } else {
+                    println!("Failed to parse JSON from text payload.");
+                }
+
+                let mut output = HashMap::new();
+                output.insert("operation".to_string(), cli_command.get("operation").cloned().unwrap_or(Value::Null));
+                output.insert("ip_address".to_string(), cli_command.get("ip_address").cloned().unwrap_or(Value::Null));
+                output.insert("scan_type".to_string(), cli_command.get("scan_type").cloned().unwrap_or(Value::Null));
+
+                create_log_entry("handle_task_event", LOG_TYPE.info.to_string(), "Task event received");
+                print!("Task event received: {:#?}\n", cli_command);
+                // run_task(cli_command, output);
+
+            }
+        }
+    };
+
     loop {
+        let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
         println!("Config loaded successfully. Agent ID: {}", agent_id);
         
         let url = format!("http://localhost:5678");
@@ -584,16 +672,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .namespace("/")
             .reconnect(false)
             .opening_header("agentID", HeaderValue::from_str(&agent_id).unwrap())
-            .on("open", move |client, _| {
+            .on("open", move |message, client| {
+                client.emit("subscribe", json!({"room": agent_id, "version": VERSION}));
                 connection_successful_clone.store(true, Ordering::Relaxed);
                 println!("Connected to server.");
                 // Allow ping to be sent
                 *can_send_ping_clone.lock().unwrap() = true;
             })
-            .on("agent_pong", move |_, _| {
-                let mut last_pong = last_pong_received_clone.lock().unwrap();
-                *last_pong = Instant::now();
-                println!("Agent pong received and timestamp updated to {:?}", last_pong);
+            .on("agent_pong", move |data, _| {   
+            let mut last_pong = last_pong_received_clone.lock().unwrap();
+            *last_pong = Instant::now();
+            println!("Agent pong received and timestamp updated to {:?}", last_pong);
+
+            })            
+            .on("task", handle_task_event)
+            // .on("health_check",handle_health_check_event)
+            // .on("uninstall", handle_uninstall_agent)
+            // .on("push_updates", handle_agent_updates)
+            .on("disconnect", move |_, _| {
+                eprintln!("Disconnected from server.");
             })
             .connect()
         {
@@ -604,11 +701,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
+
+        
         
         // Wait for connection to be established
         while !connection_successful.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_secs(1));
         }
+
+        let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
 
         // Subscribe to room
         if let Err(e) = socket.emit("subscribe", json!({"room": agent_id})) {
