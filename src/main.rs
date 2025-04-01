@@ -13,13 +13,15 @@ use lazy_static::lazy_static;
 use once_cell::sync::OnceCell;
 use std::path::MAIN_SEPARATOR;
 use std::fs::OpenOptions;
-use rsa::{pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding}, RsaPrivateKey, RsaPublicKey, Oaep};
+use rsa::{RsaPrivateKey, RsaPublicKey, Oaep,pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding}};
+// use rsa::oaep::Oaep;
 use rand::rngs::OsRng;
 use base64::{encode, decode};
 use sha2::Sha256;
 use reqwest::{blocking::Client, Method, Response, header};
 use serde_json::{Value, json};
 use std::error::Error;
+use rand::thread_rng;
 
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
 const CHECK_INTERVAL: u64 = 30;
@@ -47,6 +49,8 @@ lazy_static::lazy_static! {
         error: "ERROR".to_string(),
         warning: "WARNING".to_string(),
     };
+
+    pub static ref SERVER_SECRET_KEY: String = "1taeEsDrioWlGRPsUT6KITKc/z+Je1WPkC8PBMM3PCE=".to_string();
 
     pub static ref TEMP_DIR: String = if cfg!(target_os = "windows") {
         env::temp_dir().to_string_lossy().to_string()
@@ -119,6 +123,10 @@ lazy_static::lazy_static! {
 
 lazy_static! {
     static ref CONFIG: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
+    static ref SERVER_PRIVATE_KEY: Mutex<Option<RsaPrivateKey>> = Mutex::new(None);
+    static ref SERVER_PUBLIC_KEY: Mutex<Option<RsaPublicKey>> = Mutex::new(None);
+    static ref MAX_NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(10);
+    static ref NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(0);
 }
 
 fn generate_key_pair() -> Result<(RsaPrivateKey, RsaPublicKey), Box<dyn std::error::Error>> {
@@ -126,19 +134,48 @@ fn generate_key_pair() -> Result<(RsaPrivateKey, RsaPublicKey), Box<dyn std::err
     let bits = 2048;
     let private_key = RsaPrivateKey::new(&mut rng, bits)?;
     let public_key = RsaPublicKey::from(&private_key);
+    *SERVER_PRIVATE_KEY.lock().unwrap() = Some(private_key.clone()); // Clone to avoid move
+    *SERVER_PUBLIC_KEY.lock().unwrap() = Some(public_key.clone());   // Clone to avoid move
     Ok((private_key, public_key))
 }
 
-fn encrypt_message(public_key: &RsaPublicKey, message: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let mut rng = OsRng;
-    let encrypted = public_key.encrypt(&mut rng, Oaep::new::<Sha256>(), message.as_bytes())?;
-    Ok(encode(&encrypted))
+fn get_public_key_pem() -> Option<String> {
+    SERVER_PUBLIC_KEY.lock().unwrap().as_ref().map(|key| {
+        key.to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("Failed to encode public key")
+    })
 }
 
-fn decrypt_message(private_key: &RsaPrivateKey, encrypted_message: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let encrypted_bytes = decode(encrypted_message)?;
-    let decrypted = private_key.decrypt(Oaep::new::<Sha256>(), &encrypted_bytes)?;
-    Ok(String::from_utf8(decrypted)?)
+fn get_private_key_pem() -> Option<String> {
+    SERVER_PRIVATE_KEY.lock().unwrap().as_ref().map(|key| {
+        key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("Failed to encode private key")
+            .to_string() // Convert Zeroizing<String> to String
+    })
+}
+
+
+fn encrypt_message(message: &str, public_key: &RsaPublicKey) -> Option<String> {
+    let mut rng = thread_rng();
+
+    let encrypted_data = public_key.encrypt(
+        &mut rng,
+        Oaep::new::<Sha256>(), // ✅ Updated syntax
+        message.as_bytes(),
+    ).ok()?;
+
+    Some(base64::encode(encrypted_data))
+}
+
+fn decrypt_message(encrypted_message: &str, private_key: &RsaPrivateKey) -> Option<String> {
+    let encrypted_data = base64::decode(encrypted_message).ok()?;
+    
+    let decrypted_data = private_key.decrypt(
+        Oaep::new::<Sha256>(), // ✅ Updated syntax
+        &encrypted_data,
+    ).ok()?;
+
+    Some(String::from_utf8(decrypted_data).ok()?)
 }
 
 /// Function to make an HTTP request with GET or POST method
@@ -180,11 +217,16 @@ fn send_request(
     let response = request_builder.send()?;
     let status = response.status();
     let response_text = response.text()?;
+
+    if status.is_success() {
+        println!("Request successful");
+        let json_response: Value = serde_json::from_str(&response_text).unwrap_or(json!({"error": "Invalid JSON response"}));
+        Ok(json_response)
+    } else {
+        println!("Request failed with status: {}", status);
+        Err(format!("Request failed with status: {}", status).into())
+    }
     
-    let json_response: Value = serde_json::from_str(&response_text).unwrap_or(json!({"error": "Invalid JSON response"}));
-    
-    println!("Status: {}", status);
-    Ok(json_response)
 }
 
 
@@ -217,9 +259,9 @@ fn get_config_file_path() -> String {
     if cfg!(target_os = "windows") {
         // check if this file exists
         if !(fs::read_to_string("C:\\Program Files (x86)\\Secops Solution CLI\\config.txt").is_err()) {
-            return "C:\\Program Files (x86)\\Secops Solution CLI\\secops_config.txt".to_string();
+            return "C:\\Program Files (x86)\\Secops Solution CLI\\config.txt".to_string();
         }
-        return "C:\\Program Files (x86)\\Secops Solution CLI\\config.txt".to_string();
+        return "C:\\Program Files (x86)\\Secops Solution CLI\\secops_config.txt".to_string();
     } else {
         // check if this file exists
         if !(fs::read_to_string("/usr/local/bin/secops_config.txt").is_err()) {
@@ -265,15 +307,6 @@ fn is_admin() -> bool {
     }
 
 
-}
-
-
-
-// Mock function for sending public key to backend
-fn send_public_key_to_backend(public_key: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Implement actual backend communication here
-    println!("Sending public key to backend: {}", public_key);
-    Ok(())
 }
 
 fn initiate_local_scan() {
@@ -393,6 +426,91 @@ fn check_log_file() -> Option<String> {
     Some(format!("{}{}{}", LOGFILE_PATH.as_str(), MAIN_SEPARATOR, LOGFILE_NAME.as_str()))
 }
 
+fn share_public_key_with_backend() -> Result<(), Box<dyn std::error::Error>> {
+
+    let public_key = get_public_key_pem().expect("Public key not found in get_public_key_pem");
+    let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
+    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
+    let endpoint = "agent/share_key";
+    let payload_data = json!({
+        "public_key" :  public_key,
+        "agent_id" : agent_id,
+        "secret_key": *SERVER_SECRET_KEY
+    });
+    let payload = Some(&payload_data);
+    match send_request(&base_url, endpoint, None, payload, Method::POST) {
+        Ok(response) => {
+            println!("Response: {:?}", response);
+            Ok(())
+        },
+        Err(e) => {
+            eprintln!("Request failed: {}", e);
+            Err(e)
+        },
+    }
+}
+
+fn generate_and_share_server_keys() -> Result<(), Box<dyn std::error::Error>> {
+    let mut attempts = NO_OF_KEY_SHARING_ATTEMPTS.lock().unwrap();
+    let max_attempts = *MAX_NO_OF_KEY_SHARING_ATTEMPTS.lock().unwrap();
+
+    create_log_entry(
+        "generate_and_share_server_keys",
+        LOG_TYPE.info.to_string(),
+        "Generating and sharing server keys",
+    );
+
+    if *attempts >= max_attempts {
+        println!("Max key-sharing attempts reached!");
+        return Err("Max key-sharing attempts reached!".into());
+    }
+
+    *attempts += 1; // Increment attempt count
+
+    // Use a loop to retry instead of recursion
+    for _ in 0..max_attempts {
+        match generate_key_pair() {
+            Ok((private_key, public_key)) => {
+                println!("Key pair generated successfully");
+
+                match share_public_key_with_backend() {
+                    Ok(_) => {
+                        println!("Public key shared successfully");
+                        create_log_entry(
+                            "generate_and_share_server_keys",
+                            LOG_TYPE.info.to_string(),
+                            "Public key shared successfully",
+                        );
+                        return Ok(()); // ✅ Exit function on success
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to share public key: {}", e);
+                        create_log_entry(
+                            "generate_and_share_server_keys",
+                            LOG_TYPE.error.to_string(),
+                            &format!("Failed to share public key: {}", e),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to generate key pair: {}", e);
+                create_log_entry(
+                    "generate_and_share_server_keys",
+                    LOG_TYPE.error.to_string(),
+                    &format!("Failed to generate key pair: {}", e),
+                );
+            }
+        }
+
+        // Wait before retrying (optional)
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+
+    // If max attempts are reached, return error
+    Err("Max key-sharing attempts exceeded!".into())
+}
+
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -444,29 +562,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         process::exit(1);
     }
 
-    match generate_key_pair() {
-        Ok((private_key, public_key)) => {
-            println!("Key pair generated successfully");
-
-            fs::write("private_key.pem", private_key.to_pkcs8_pem(LineEnding::LF)?.to_string())
-                .expect("Unable to write private key");
-            fs::write("public_key.pem", public_key.to_public_key_pem(LineEnding::LF)?)
-                .expect("Unable to write public key");
-
-            let message = "Hello, Rust!";
-            match encrypt_message(&public_key, message) {
-                Ok(encrypted) => {
-                    println!("Encrypted: {}", encrypted);
-                    match decrypt_message(&private_key, &encrypted) {
-                        Ok(decrypted) => println!("Decrypted: {}", decrypted),
-                        Err(e) => eprintln!("Decryption failed: {}", e),
-                    }
-                },
-                Err(e) => eprintln!("Encryption failed: {}", e),
-            }
-        },
-        Err(e) => eprintln!("Failed to generate key pair: {}", e),
-    }
+    generate_and_share_server_keys();
 
     loop {
         println!("Config loaded successfully. Agent ID: {}", agent_id);
