@@ -1,6 +1,6 @@
 use rsa::pkcs8::der::asn1::Null;
 use rust_socketio::{client, ClientBuilder, Payload, RawClient};
-use std::fs::{remove_file, File};
+use std::fs::{create_dir, remove_file, File};
 use std::{env, fs, process, time};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
@@ -23,11 +23,28 @@ use reqwest::{blocking::Client, Method, Response, header};
 use serde_json::{Value, json};
 use std::error::Error;
 use rand::thread_rng;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::io::{self, BufRead, BufReader};
+use regex::Regex;
+use std::net::TcpStream;
+use std::process:: {Stdio};
+
 
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
 const CHECK_INTERVAL: u64 = 30;
-const PONG_TIMEOUT: u64 = 30; // Increased timeout to 30 seconds
-const VERSION: &str = "1.0.0";
+const PONG_TIMEOUT: u64 = 30;
+const VERSION: &str = "V1.0.36";
+const AGENT_MODE_ENDPOINT :&str = "ENDPOINT";
+const AGENT_MODE_JUMP_HOST :&str = "JUMP_HOST";
+const AGENT_MODE :&str = AGENT_MODE_ENDPOINT;
+const UBUNTU_18_OS_NAME: &str = "ubuntu-18.04";
+const UBUNTU_20_OS_NAME: &str = "ubuntu-20.04";
+const UBUNTU_22_OS_NAME: &str = "ubuntu-22.04";
+
+const SECOPS_UBUNTU_18_JUMP_HOST_SERVICE_BINARY_FILE_NAME: &str = "SecOpsJumpHostServiceBinaryUbuntu18";
+const SECOPS_UBUNTU_20_JUMP_HOST_SERVICE_BINARY_FILE_NAME: &str = "SecOpsJumpHostServiceBinaryUbuntu20";
+const SECOPS_UBUNTU_22_JUMP_HOST_SERVICE_BINARY_FILE_NAME: &str = "SecOpsJumpHostServiceBinaryUbuntu22";
 
 
 pub struct log_type {
@@ -119,6 +136,12 @@ lazy_static::lazy_static! {
         "secops_service.log".to_string()
     };
 
+    pub static ref SECOPS_BINARY_DIRECTORY: String = if cfg!(target_os = "windows") {
+        format!("{}{}{}", TEMP_DIR.as_str(), MAIN_SEPARATOR, "secops")
+    } else {
+        format!("{}{}{}", TEMP_DIR.as_str(), MAIN_SEPARATOR, "secops")
+    };
+
 }
 
 
@@ -128,6 +151,212 @@ lazy_static! {
     static ref SERVER_PUBLIC_KEY: Mutex<Option<RsaPublicKey>> = Mutex::new(None);
     static ref MAX_NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(10);
     static ref NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(0);
+}
+
+fn escape_ansi(line: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref ANSI_ESCAPE: Regex = Regex::new(r"(\x9B|\x1B\[)[0-?]*[ -/]*[@-~]").unwrap();
+    }
+    
+    ANSI_ESCAPE.replace_all(line, "").to_string()
+}
+
+fn check_binary() -> Result<PathBuf, bool> {
+    if env::consts::OS == "windows" {
+        let binary_path = Path::new(BINARY_DIRECTORY.as_str()).join("secops_cli_windows-latest.exe");
+        
+        // check if binary exists
+        if !binary_path.exists() {
+            create_log_entry("check_binary", LOG_TYPE.error.to_string(), &format!("Binary not found: {}", binary_path.display()));
+            download_secops_agent_binary("secops_cli_windows-latest.exe",TEMP_DIR.as_str(),false);
+            if !binary_path.exists() {
+                create_log_entry("check_binary", LOG_TYPE.error.to_string(), &format!("Binary not found: {}", binary_path.display()));
+                return Err(false);
+            }
+        }
+        
+        create_log_entry( "check_binary",LOG_TYPE.info.to_string(), &format!("Using binary: {}", binary_path.display()));
+        Ok(binary_path)
+    } else {
+
+        println!("Using binary directory: {}", BINARY_DIRECTORY.as_str());
+        let dir_files = match fs::read_dir(BINARY_DIRECTORY.as_str()) {
+            Ok(entries) => {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect::<Vec<String>>()
+            }
+            Err(_) => return Err(false),
+        };
+        
+        let binary_name = if dir_files.contains(&"secops_cli_ubuntu-20.04".to_string()) {
+            "secops_cli_ubuntu-20.04"
+        } else if dir_files.contains(&"secops_cli_ubuntu-18.04".to_string()) {
+            "secops_cli_ubuntu-18.04"
+        } else if dir_files.contains(&"secops_cli_ubuntu-22.04".to_string()) {
+            "secops_cli_ubuntu-22.04"
+        } else if dir_files.contains(&"secops_cli_amazon_linux-2023".to_string()) {
+              "secops_cli_amazon_linux-2023"
+        } else if dir_files.contains(&"secops_cli_rocky_linux".to_string()) {
+            "secops_cli_rocky_linux"
+        } else if dir_files.contains(&"secops_cli_centos_7".to_string()) {
+            "secops_cli_centos_7"
+        } else if dir_files.contains(&"secops_cli_centos_8".to_string()) {
+            "secops_cli_centos_8"
+        } else if dir_files.contains(&"secops_cli_macos_arm64".to_string()) {
+             "secops_cli_macos_arm64"
+        } else if dir_files.contains(&"secops_cli_macos_x86_64".to_string()) {
+           "secops_cli_macos_x86_64"
+        } else {
+            return Err(false);
+        };
+        
+        let binary_path = Path::new(BINARY_DIRECTORY.as_str()).join(binary_name.to_string());
+        create_log_entry("check_binary",LOG_TYPE.info.to_string(),&format!("Using binary: {}", binary_path.display()));
+        Ok(binary_path)
+    }
+}
+
+fn check_health() -> HashMap<String, String> {
+    let fail_return: HashMap<String, String> = [
+        ("status".to_string(), "FAIL".to_string()),
+        ("message".to_string(), "Binary not found".to_string()),
+    ].iter().cloned().collect();
+
+    // Try-catch equivalent in Rust with Result handling
+    match (|| -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+        let binary_path = check_binary().map_err(|_| "Binary check failed")?;
+        
+        let cli_process = Command::new(binary_path)
+            .arg("-V")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        
+        let mut output = Vec::new();
+        
+        if let Some(stdout) = cli_process.stdout {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let bytes_read = reader.read_line(&mut line)?;
+            
+            if bytes_read == 0 {
+                return Ok(fail_return);
+            }
+            
+            line = line.trim().to_string();
+            line = escape_ansi(&line);
+            
+            if line.contains("V") && line.contains(".") {
+                output.push(line.clone());
+                create_log_entry("check_health",LOG_TYPE.info.to_string(),&line);
+            }
+        } else {
+            return Ok(fail_return);
+        }
+        
+        let res = if !output.is_empty() {
+            [
+                ("version".to_string(), output.join("")),
+                ("status".to_string(), "SUCCESS".to_string()),
+            ].iter().cloned().collect()
+        } else {
+            [
+                ("version".to_string(), "Not Found".to_string()),
+                ("status".to_string(), "FAIL".to_string()),
+            ].iter().cloned().collect()
+        };
+        
+        Ok(res)
+    })() {
+        Ok(result) => result,
+        Err(ex) => {
+            let err = "Exception Occurred while checking the health of the service";
+            create_log_entry("check_health", LOG_TYPE.error.to_string(), &format!("{}{}", err, ex));
+            [
+                ("status".to_string(), "FAIL".to_string()),
+                ("message".to_string(), err.to_string()),
+            ].iter().cloned().collect()
+        }
+    }
+}
+
+fn check_agent_health() ->  Result<(), Box<dyn std::error::Error>> {
+    let health_check_response = check_health();
+    let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
+    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
+    let end_point = "agent/health_check_upload";
+    let url = format!("{}{}", base_url, end_point);
+
+    let json_payload = json!({
+        "agent_id": agent_id,
+        "version": health_check_response.get("version").unwrap(),
+        "server_version": VERSION,
+        "status": health_check_response
+    });
+    let payload = Some(&json_payload);
+
+    match send_request(base_url.as_str(), end_point, None, payload, Method::POST) {
+        Ok(response) => {
+            Ok(())
+        },
+        Err(e) => {
+            create_log_entry("check_agent_health", LOG_TYPE.info.to_string(), "Agent health check failed");
+            eprintln!("Request failed: {}", e);
+            Err(e)
+        }
+        
+    }
+
+}
+
+fn check_jwt_status(jwt_token: String) ->  bool {
+   
+    let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
+    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
+    let end_point = "agent/validate_jwt";
+    let url = format!("{}{}", base_url, end_point);
+
+    if jwt_token.is_empty() {
+        create_log_entry("check_jwt_status", LOG_TYPE.info.to_string(), "No JWT token found");
+        return false
+    } else {
+        
+        let client = Client::new();
+        let full_url = format!("{}{}", base_url, end_point);
+    
+        let mut request_builder = client.request(Method::GET, &full_url);
+
+        request_builder = request_builder.header(header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", jwt_token)).unwrap());
+    
+        let response = request_builder.send().unwrap();
+        let status = response.status();
+        let response_text = response.text().unwrap();
+
+        if status.is_success() {
+            let json_response: Value = serde_json::from_str(&response_text).unwrap_or(json!({"error": "Invalid JSON response"}));
+
+            if let Some(success) = json_response.get("success") {
+                if success.as_bool().unwrap_or(false) {
+                    create_log_entry("check_jwt_status", LOG_TYPE.info.to_string(), "JWT validation successful");
+                    return true
+                } else {
+                    create_log_entry("check_jwt_status", LOG_TYPE.error.to_string(), &format!("JWT validation failed: {}", json_response.get("error").unwrap()));
+                    return false
+                }
+            } else {
+                create_log_entry("check_jwt_status", LOG_TYPE.error.to_string(), &format!("JWT validation failed: {}", json_response.get("error").unwrap()));
+                return false
+            }
+        } else {
+            println!("Request failed with status: {} url : {}", status,full_url);
+            create_log_entry("check_jwt_status", LOG_TYPE.error.to_string(), &format!("JWT validation failed: {}", response_text));
+            return false
+        }
+    }
+    
+
 }
 
 fn generate_key_pair() -> Result<(RsaPrivateKey, RsaPublicKey), Box<dyn std::error::Error>> {
@@ -155,21 +384,6 @@ fn get_private_key_pem() -> Option<String> {
     })
 }
 
-
-// fn encrypt_message(message: &str) -> Option<String> {
-//     let mut rng = thread_rng();
-
-//     let public_key = SERVER_PUBLIC_KEY.lock().unwrap().as_ref().ok_or("Public key not found").ok()?;
-
-//     let encrypted_data = public_key.encrypt(
-//         &mut rng,
-//         Oaep::new::<Sha256>(), // ✅ Updated syntax
-//         message.as_bytes(),
-//     ).ok()?;
-
-//     Some(base64::encode(encrypted_data))
-// }
-
 fn decrypt_message(encrypted_message: &str) -> String {
     let private_key_guard = SERVER_PRIVATE_KEY.lock().unwrap(); // Store MutexGuard
 
@@ -181,11 +395,13 @@ fn decrypt_message(encrypted_message: &str) -> String {
         }
     };
 
-    let encrypted_data = match base64::decode(encrypted_message) {
+    println!("Attempting to decode Base64: {}", encrypted_message);
+
+    let encrypted_data = match base64::decode(encrypted_message.trim()) {
         Ok(data) => data,
-        Err(_) => {
-            eprintln!("Error: Failed to decode Base64");
-            return "Error: Failed to decode Base64".to_string();
+        Err(e) => {
+            eprintln!("Error: Failed to decode Base64 -> {}", e);
+            return format!("Error: Failed to decode Base64 -> {}", e);
         }
     };
 
@@ -207,8 +423,6 @@ fn decrypt_message(encrypted_message: &str) -> String {
 }
 
 
-
-
 /// Function to make an HTTP request with GET or POST method
 fn send_request(
     base_url: &str,
@@ -228,19 +442,8 @@ fn send_request(
         request_builder = request_builder.header(header::CONTENT_TYPE, "application/json");
     }
     
-    // if let Some(params) = params {
-    //     request_builder = request_builder.query(params);
-    // }
-
-    println!("Request URL: {}", full_url);
-    println!("Request Method: {}", method);
-    println!("Request Payload: {:#?}", payload);
-    
     if let Some(payload) = payload {
         let payload_str = serde_json::to_string(payload)?;
-        // let body = reqwest::Body::from(payload_str);
-        // let payload_str_cloned = payload_str.clone();
-        println!("Request Payload string: {}", payload_str);
         request_builder = request_builder
             .header(header::CONTENT_TYPE, "application/json")
             .body(payload_str);  // Convert to bytes explicitly
@@ -250,11 +453,10 @@ fn send_request(
     let response_text = response.text()?;
 
     if status.is_success() {
-        println!("Request successful");
         let json_response: Value = serde_json::from_str(&response_text).unwrap_or(json!({"error": "Invalid JSON response"}));
         Ok(json_response)
     } else {
-        println!("Request failed with status: {}", status);
+        println!("Request failed with status: {} url : {}", status,full_url);
         Err(format!("Request failed with status: {}", status).into())
     }
     
@@ -278,7 +480,6 @@ fn read_config(config_path: &str)  {
     let mut global_config = CONFIG.write().unwrap();
     *global_config = config;
 }
-
 
 // Function to print version
 fn print_version() {
@@ -341,7 +542,34 @@ fn is_admin() -> bool {
 }
 
 fn initiate_local_scan() {
-    println!("Initiating local scan");
+
+    let task = json!({
+        "operation": "local_scan",
+        "ip_address":"127.0.0.1",
+        "jwt_token": "NO_JWT",
+        "scan_profile":"Full Scan",
+        "scan_type": "local_scan",
+        "user_email": "",
+        "full_scan": true
+    });
+    
+    create_log_entry("initiate_local_scan",LOG_TYPE.info.to_string(),"Initiating local scan");
+    run_task(task);
+
+}
+
+fn initiate_local_patch_scan() {
+    let task = json!({
+        "operation": "local_patch_scan",
+        "ip_address":"127.0.0.1",
+        "jwt_token": "NO_JWT",
+        "scan_profile":"Full Scan",
+        "scan_type": "local_patch_scan",
+        "user_email": "",
+        "full_scan": true
+    });
+    create_log_entry("initiate_local_patch_scan",LOG_TYPE.info.to_string(),"Initiating local patch scan");
+    run_task(task);
 }
 
 fn get_config_value(key: &str) -> Option<String> {
@@ -349,7 +577,7 @@ fn get_config_value(key: &str) -> Option<String> {
     config.get(key).cloned() // Return a cloned value
 }
 
-fn update_config_value(key: &str, value: &str) {
+fn set_config_value(key: &str, value: &str) {
     let mut config = CONFIG.write().unwrap();
     config.insert(key.to_string(), value.to_string());
 }
@@ -388,7 +616,6 @@ fn prepare_working_dirs() -> bool {
     true
 }
 
-
 fn write_logs_to_file(log: &LogEntry) {
     match check_log_file() {
         Some(log_file_path) => {
@@ -414,7 +641,6 @@ fn write_logs_to_file(log: &LogEntry) {
         }
     }
 }
-
 
 fn create_log_entry(function_name: &str, log_type: String, message: &str) {
     let log_entry = LogEntry {
@@ -445,7 +671,7 @@ fn create_log_entry(function_name: &str, log_type: String, message: &str) {
     let payload = Some(&payload_data);
 
     match send_request(&base_url, endpoint, None, payload, Method::POST) {
-        Ok(response) => println!("Response: {:?}", response),
+        Ok(response) => (),
         Err(e) => eprintln!("Request failed: {}", e),
     }
 
@@ -471,7 +697,6 @@ fn share_public_key_with_backend() -> Result<(), Box<dyn std::error::Error>> {
     let payload = Some(&payload_data);
     match send_request(&base_url, endpoint, None, payload, Method::POST) {
         Ok(response) => {
-            println!("Response: {:?}", response);
             Ok(())
         },
         Err(e) => {
@@ -502,7 +727,12 @@ fn generate_and_share_server_keys() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..max_attempts {
         match generate_key_pair() {
             Ok((private_key, public_key)) => {
-                println!("Key pair generated successfully");
+
+                create_log_entry(
+                    "generate_and_share_server_keys",
+                    LOG_TYPE.info.to_string(),
+                    "Key pair generated sucessfully",
+                );
 
                 match share_public_key_with_backend() {
                     Ok(_) => {
@@ -542,8 +772,673 @@ fn generate_and_share_server_keys() -> Result<(), Box<dyn std::error::Error>> {
     Err("Max key-sharing attempts exceeded!".into())
 }
 
+fn schedule_local_agent_scan(scheduled_time: &str) {
+    let mut lines = Vec::new();
+    let mut scheduled_time_exist_flag = false;
+
+    let config_file_path = get_config_file_path();
+    
+    // Read the config file if it exists
+    if Path::new(&config_file_path).exists() {
+        if let Ok(file) = File::open(config_file_path) {
+            for line in io::BufReader::new(file).lines() {
+                if let Ok(mut line) = line {
+                    if line.starts_with("scheduled_time=") {
+                        line = format!("scheduled_time={}", scheduled_time);
+                        scheduled_time_exist_flag = true;
+                    } else if scheduled_time_exist_flag && line.starts_with("last_schedule_scan=") {
+                        line = "last_schedule_scan=None".to_string();
+                    }
+                    lines.push(line);
+                }
+            }
+        }
+    }
+
+    let config_file_path = get_config_file_path();
+    
+    // Write back the modified content
+    if scheduled_time_exist_flag {
+        if let Ok(mut file) = File::create(config_file_path.clone()) {
+            for line in &lines {
+                writeln!(file, "{}", line).unwrap();
+            }
+        }
+    } else {
+        let mut file = OpenOptions::new().append(true).create(true).open(&config_file_path).unwrap();
+        writeln!(file, "scheduled_time={}", scheduled_time).unwrap();
+        writeln!(file, "last_schedule_scan=None").unwrap();
+    }
+    
+    unsafe {
+        set_config_value("scheduled_time", scheduled_time);
+        set_config_value("last_schedule_scan", "None");
+    }
+    
+    create_log_entry("schedule_local_agent_scan",LOG_TYPE.info.to_string(),"Local scan scheduled successfully");
+    acknowledge_agent_configuration_setup_status("schedule_scan");
+}
+
+fn acknowledge_agent_configuration_setup_status(config_param: &str) {
+    let base_url: String = get_config_value("BASE_URL").unwrap();
+    let endpoint = "agent/acknowledge_configuration_setup";
+    let payload_data = json!({
+        "config_param": config_param,
+        "agent_id": get_config_value("A_ID").unwrap()
+    });
+    let payload = Some(&payload_data);
+
+    match send_request(&base_url, endpoint, None, payload, Method::POST) {
+        Ok(response) => {
+            create_log_entry("acknowledge_agent_configuration_setup_status", LOG_TYPE.info.to_string(), "Configuration setup status acknowledged");
+        },
+        Err(e) => {
+            eprintln!("Request failed: {}", e);
+            create_log_entry("acknowledge_agent_configuration_setup_status", LOG_TYPE.error.to_string(), "Configuration setup status not acknowledged");
+        },
+    }
+}
+
+fn set_agent_mode(agent_mode: &str) {
+    let mut lines = Vec::new();
+    let mut agent_mode_exist_flag = false;
+
+    let config_file_path = get_config_file_path();
+    
+    if Path::new(&config_file_path).exists() {
+        if let Ok(file) = File::open(config_file_path) {
+            for line in io::BufReader::new(file).lines() {
+                if let Ok(mut line) = line {
+                    if line.starts_with("agent_mode=") {
+                        line = format!("agent_mode={}", agent_mode);
+                        agent_mode_exist_flag = true;
+                    }
+                    lines.push(line);
+                }
+            }
+        }
+    }
+    
+    let config_file_path = get_config_file_path();
+    if agent_mode_exist_flag {
+        if let Ok(mut file) = File::create(config_file_path) {
+            for line in &lines {
+                writeln!(file, "{}", line).unwrap();
+            }
+        }
+    } else {
+        let mut file = OpenOptions::new().append(true).create(true).open(&config_file_path).unwrap();
+        writeln!(file, "agent_mode={}", agent_mode).unwrap();
+    }
+    
+   set_config_value("agent_mode", agent_mode);
+    
+    if agent_mode == AGENT_MODE_JUMP_HOST {
+        if !is_secops_file_transfer_service_running() {
+            create_log_entry("set_agent_mode", LOG_TYPE.info.to_string(), "Initiating SecOps jump host service");
+            initiate_secops_jump_host_service();
+        } else {
+            create_log_entry("set_agent_mode", LOG_TYPE.info.to_string(), "SecOps jump host service already running");
+        }
+    } else {
+        if cfg!(unix) {
+            if is_secops_file_transfer_service_running() {
+                stop_secops_jump_host_service();
+            }
+        }
+    }
+    
+    create_log_entry("set_agent_mode",LOG_TYPE.info.to_string(),"Agent mode configured successfully.");
+    acknowledge_agent_configuration_setup_status("agent_mode");
+}
+
+fn get_jump_host_binary_file_name() -> Option<String> {
+    let ubuntu_cli_name_list: HashMap<&str, &str> = HashMap::from([
+        (UBUNTU_18_OS_NAME, SECOPS_UBUNTU_18_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
+        (UBUNTU_20_OS_NAME, SECOPS_UBUNTU_20_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
+        (UBUNTU_22_OS_NAME, SECOPS_UBUNTU_22_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
+    ]);
+
+    let current_dir = INSTALL_DIR.as_str();
+
+    if let Ok(entries) = fs::read_dir(current_dir) {
+        for entry in entries.flatten() {
+            if let Some(file_name) = entry.file_name().to_str() {
+                for (cli_name, binary_name) in &ubuntu_cli_name_list {
+                    if file_name.contains(cli_name) {
+                        return Some(binary_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn download_secops_agent_binary(filename :&str,download_folder:&str,run_chmod:bool) {
+    let agent_id = get_config_value("A_ID");
+    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
+    let endpoint_url = "utility/download_agent_file";
+
+    let file_download_path = format!("{}{}{}",download_folder,MAIN_SEPARATOR,filename);
+    let json_payload = json!({
+        "agent_id": agent_id,
+        "file_name": filename
+    });
+    let payload: Option<&Value> = Some(&json_payload);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("Content-Type", "application/json".parse().unwrap());
+
+    create_log_entry("download_secops_agent_binary", LOG_TYPE.info.to_string(), &format!("Downloading agent binary: {}", filename));
+
+    // make the request and download the file
+
+    let client = Client::new();
+    let full_url = format!("{}{}", base_url, endpoint_url);
+    
+    let mut request_builder = client.request(Method::POST, full_url.clone());
+
+    request_builder = request_builder.header(header::CONTENT_TYPE, "application/json");
+    
+    if let Some(payload) = payload {
+        let payload_str = serde_json::to_string(payload).unwrap();
+        request_builder = request_builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(payload_str);  // Convert to bytes explicitly
+    }
+    let mut response = request_builder.send().unwrap();
+    let status = response.status();
+   
+
+    if status.is_success() {
+        let mut file = File::create(file_download_path.clone()).unwrap();
+        response.copy_to(&mut file).unwrap();
+        if run_chmod {
+            let chmod_command = format!("chmod +x {}", file_download_path);
+            let chmod_output = Command::new("bash")
+                .arg("-c")
+                .arg(chmod_command)
+                .output()
+                .expect("Failed to run chmod command"); 
+
+            if chmod_output.status.success() {
+                println!("Chmod command executed successfully");
+            } else {
+                println!("Chmod command failed with status: {}", chmod_output.status);
+            }
+        }
+        println!("File downloaded successfully to {}", file_download_path);
+        create_log_entry("download_secops_agent_binary",LOG_TYPE.info.to_string(),&format!("File downloaded successfully to {}", file_download_path));
+    } else {
+        println!("Request failed with status: {} url : {}", status,full_url);
+        create_log_entry("download_secops_agent_binary", LOG_TYPE.error.to_string(), &format!("Request failed with status: {} url : {}", status,full_url));
+    }
+    
+}
+
+fn initiate_secops_jump_host_service() {
+    let local_working_dir = format!("{}{}{}",TEMP_DIR.to_string(),MAIN_SEPARATOR,"secops");
+    // check if this dir exists or not if not create it
+    if !Path::new(&local_working_dir).exists() {
+        create_dir(&local_working_dir);
+    }
+    
+    create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.info.to_string(),"Initiating SecOps service");
+
+    match get_jump_host_binary_file_name() {
+        Some(binary) => {
+            let binary_full_path = format!("{}{}{}",local_working_dir,MAIN_SEPARATOR,binary);
+
+            create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.info.to_string(),&format!("Checking if binary {} exists",binary_full_path));
+
+            // check if this file exists or not if download it
+            if !Path::new(&binary_full_path).exists() {
+                download_secops_agent_binary(&binary,&local_working_dir,true);
+            }
+            
+            let command_str = format!("cd {} && ./{}",local_working_dir,binary);
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(command_str)
+                .output()
+                .expect("Failed to run bash command");
+            
+            if output.status.success() {
+                println!("SecOps service started successfully.");
+                create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.info.to_string(),&format!("SecOps service started successfully."));
+            } else {
+                println!("SecOps service failed to start.");
+                create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.error.to_string(),&format!("SecOps service failed to start, error message: {}",String::from_utf8_lossy(&output.stderr)));
+            }
+            
+        },
+        None => create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.error.to_string(),"Unable to find SecOps Jump host binary"),
+    }
 
 
+}
+
+fn stop_secops_jump_host_service() {
+    let command = "if pgrep -f SecOpsJumpHostServiceBinary; then pgrep -f SecOpsJumpHostServiceBinary | xargs kill -9; fi";
+    if let Err(err) = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        create_log_entry("stop_secops_jump_host_service",LOG_TYPE.error.to_string(),&format!("Error while stopping SecOps service: {:?}", err));
+    }
+}
+
+
+fn is_secops_file_transfer_service_running() -> bool {
+    let host = "127.0.0.1";
+    let port = 5679;
+    match TcpStream::connect((host, port)) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+fn run_task(task_json:Value)  {
+    
+    let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
+    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
+    let cli_binary_path = check_binary().expect("Binary not found in check_binary");
+
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Attempting to run task using : {}", cli_binary_path.display()));
+
+    // check if the file cli_binary_path exists or not if not download it
+    // if !Path::new(&cli_binary_path).exists() {
+    //     download_secops_agent_binary("secops_cli_ubuntu-20.04",TEMP_DIR.as_str(),false);
+    // }
+
+
+    let operation = task_json["operation"].as_str().unwrap_or("").to_string();
+
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Operation : {}", operation));
+
+    if operation.is_empty() {
+        create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Operation Specified");
+        return;
+    }
+
+    if operation == "schedule_local_scan"{
+        let schedule_time = task_json["schedule_time"].as_str().unwrap_or("").to_string();
+        if schedule_time.is_empty() {
+            create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Schedule Time Specified");
+            return;
+        }
+        schedule_local_agent_scan(&schedule_time);
+        return;
+    }
+
+    if operation == "set_agent_mode" {
+        let agent_mode = task_json["agent_mode"].as_str().unwrap_or("").to_string();
+        if agent_mode.is_empty() {
+            create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Agent Mode Specified");
+            return;
+        }
+        set_agent_mode(&agent_mode);
+        return;
+    }
+
+    let mut argument_dict: HashMap<String, Value> = HashMap::new();
+    argument_dict.insert(operation.to_string(), task_json);
+    argument_dict
+        .entry(operation.to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .unwrap()
+        .insert("Agent_ID".to_string(), Value::String(agent_id.to_string()));
+
+    // check if secops_binary_config is in the argument_dict[operation]
+    if !argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
+
+        let current_timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
+        let temp_dir = env::temp_dir().join("secops");
+
+        // Ensure secops directory exists
+        if !temp_dir.exists() {
+            fs::create_dir_all(&temp_dir).expect("Failed to create secops directory");
+        }
+
+        let secops_binary_config_file_path = if operation == "config_audit_scan" {
+            temp_dir.join(format!("SecOpsConfigAuditBinaryConfig_{}.json", current_timestamp))
+        } else {
+            temp_dir.join(format!("SecOpsPatchBinaryConfig_{}.json", current_timestamp))
+        };
+
+        if let Some(secops_binary_config) = argument_dict.get_mut(&operation) {
+            if let Some(secops_binary_config_value) = secops_binary_config.get("secops_binary_config") {
+                if let Some(secops_binary_config_str) = secops_binary_config_value.as_str() {
+                    let secops_binary_config_json: Value =
+                        serde_json::from_str(secops_binary_config_str).unwrap();
+
+                    // Write JSON to file
+                    let mut file =
+                        File::create(&secops_binary_config_file_path).expect("Failed to create file");
+                    file.write_all(
+                        serde_json::to_string_pretty(&secops_binary_config_json)
+                            .unwrap()
+                            .as_bytes(),
+                    )
+                    .expect("Failed to write to file");
+
+                    // Update argument_dict with file path
+                    secops_binary_config.as_object_mut().unwrap().insert(
+                        "secops_binary_config_file_path".to_string(),
+                        Value::String(secops_binary_config_file_path.to_string_lossy().into_owned()),
+                    );
+
+                    secops_binary_config.as_object_mut().unwrap().remove("secops_binary_config");
+                }
+            }
+        }
+
+    }
+
+    let argument_dict_str = serde_json::to_string(&argument_dict).unwrap();
+
+    let mut command_args = vec!["-cm", &argument_dict_str];
+
+    // Spawn the process
+    let _cli_process = Command::new(cli_binary_path)
+        .args(command_args)
+        .stdout(Stdio::null())  // Do not capture stdout
+        .stderr(Stdio::null())  // Do not capture stderr
+        .spawn()  // Start the process and return immediately
+        .expect("Failed to start process");
+
+    // Handle the spawned process (e.g., read output)
+
+
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task executed successfully"));
+
+   
+}
+
+fn check_secops_uninstaller_binary_exists() -> bool {
+    let secops_helper_path = format!("{}/{}", *SECOPS_BINARY_DIRECTORY, *HELPER_PROCESS_NAME);
+    let binary_helper_path = format!("{}/{}", *BINARY_DIRECTORY, *HELPER_PROCESS_NAME);
+
+    // Check if the file exists in SECOPS_BINARY_DIRECTORY
+    if Path::new(&secops_helper_path).exists() {
+        return true;
+    }
+
+    // If not found, check in BINARY_DIRECTORY and copy if exists
+    if Path::new(&binary_helper_path).exists() {
+        if let Err(e) = fs::copy(&binary_helper_path, &secops_helper_path) {
+            eprintln!("Error copying file: {}", e);
+            return false;
+        }
+        return true;
+    }
+
+    false
+}
+
+fn uninstall_agent(data: Payload) {
+    
+    match data {
+
+        Payload::String(s) => {
+            println!("Task event received: {}", s);
+            let json_data: serde_json::Value = serde_json::from_str(&s).unwrap();
+            let task_id = json_data["task_id"].as_str().unwrap_or_default();
+            println!("Task ID: {}", task_id);   
+        }
+        Payload::Binary(_) => {
+            // Handle binary payload
+            println!("Task event received, binary type payload");
+        }
+        Payload::Text(t) => {
+            // Handle text payload
+            create_log_entry("main", LOG_TYPE.info.to_string(), "Task Received for agent");
+
+            let mut request_json: HashMap<String, Value> = HashMap::new();
+            let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
+
+            if let Ok(json_array) = serde_json::from_str::<Value>(&json_str) {
+                
+                if let Some(json_str) = json_array.as_array().and_then(|arr| arr.get(0)).and_then(|val| val.as_str()) {
+                    // Now parse the inner JSON string
+                    if let Ok(inner_json) = serde_json::from_str::<Value>(json_str) {
+                        
+                        if let Some(obj) = inner_json.as_object() {
+                            for (key, value) in obj {
+                                request_json.insert(key.to_string(), value.clone());
+                            }
+                        }
+                    } else {
+                        println!("Failed to parse inner JSON string.");
+                    }
+                }
+            } else {
+                println!("Failed to parse JSON from text payload.");
+            }
+
+            println!("Request JSON: {:#?}", request_json);
+
+            let jwt_token = request_json["access_token"].as_str().unwrap_or_default();
+            let agent_id = request_json["agent_id"].as_str().unwrap_or_default();
+            let server_agent_id = get_config_value("A_ID").unwrap();
+
+            if agent_id != server_agent_id {
+                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), &format!("Agent ID mismatch, expected: {}, received: {}", server_agent_id, agent_id));
+                return;
+            }
+
+            if jwt_token.is_empty() {
+                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), "No JWT token found");
+                return;
+            }
+
+            if !check_jwt_status(jwt_token.to_string()) {
+                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), &format!("Error checking JWT token status"));
+                return;
+            }
+
+            if !check_secops_uninstaller_binary_exists() {
+                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), "SecOps Uninstaller binary not found");
+                return;
+            }
+
+            let secops_helper_path = format!("{}/{}", *SECOPS_BINARY_DIRECTORY, *HELPER_PROCESS_NAME);
+
+            create_log_entry("uninstall_agent", LOG_TYPE.info.to_string(), &format!("Uninstalling agent: {}", agent_id));
+
+            if cfg!(target_os = "windows") {
+                // Windows: Spawn a new process without waiting for it
+                if let Err(e) = std::process::Command::new(secops_helper_path)
+                    .arg(&format!("{}:{}", agent_id,agent_id))
+                    .spawn()
+                {
+                    eprintln!("Error spawning helper process on Windows: {}", e);
+                }
+            } else {
+                // Linux/macOS: Log the action and execute the command with sudo
+                if let Err(e) = Command::new("sudo")
+                    .arg(secops_helper_path)
+                    .arg(&format!("{}:{}", agent_id,agent_id))
+                    .spawn()
+                {
+                    eprintln!("Error spawning helper process on Unix: {}", e);
+                }
+        
+                // Optional: Give it a moment to start
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn push_agent_updates(data: Payload) {
+    
+    match data {
+
+        Payload::String(s) => {
+            println!("Task event received: {}", s);
+            let json_data: serde_json::Value = serde_json::from_str(&s).unwrap();
+            let task_id = json_data["task_id"].as_str().unwrap_or_default();
+            println!("Task ID: {}", task_id);   
+        }
+        Payload::Binary(_) => {
+            // Handle binary payload
+            println!("Task event received, binary type payload");
+        }
+        Payload::Text(t) => {
+            // Handle text payload
+            create_log_entry("main", LOG_TYPE.info.to_string(), "Task Received for agent");
+
+            let mut request_json: HashMap<String, Value> = HashMap::new();
+            let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
+
+            if let Ok(json_array) = serde_json::from_str::<Value>(&json_str) {
+                
+                if let Some(json_str) = json_array.as_array().and_then(|arr| arr.get(0)).and_then(|val| val.as_str()) {
+                    // Now parse the inner JSON string
+                    if let Ok(inner_json) = serde_json::from_str::<Value>(json_str) {
+                        
+                        if let Some(obj) = inner_json.as_object() {
+                            for (key, value) in obj {
+                                request_json.insert(key.to_string(), value.clone());
+                            }
+                        }
+                    } else {
+                        println!("Failed to parse inner JSON string.");
+                    }
+                }
+            } else {
+                println!("Failed to parse JSON from text payload.");
+            }
+
+            println!("Agent ID: {}", request_json["agent_id"].as_str().unwrap_or_default());
+
+            let agent_id = request_json["agent_id"].as_str().unwrap_or_default();
+            let server_agent_id = get_config_value("A_ID").unwrap();
+
+            if agent_id != server_agent_id {
+                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), &format!("Agent ID mismatch, expected: {}, received: {}", server_agent_id, agent_id));
+                return;
+            }
+
+            let update_type = request_json["update_type"].as_str().unwrap_or_default();
+            let agent_operating_system = request_json["agent_operating_system"].as_str().unwrap_or_default();
+            let agent_operating_system_version = request_json["agent_operating_system_version"].as_str().unwrap_or_default();
+
+            if update_type.is_empty() {
+                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "No update type found");
+                return;
+            }
+
+            if update_type != "Agent" && update_type != "Server" && update_type != "Both" {
+                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "Invalid update type");
+                return;
+            }
+
+            if agent_operating_system.is_empty() {
+                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "No agent operating system found");
+                return;
+            }
+
+            if agent_operating_system_version.is_empty() {
+                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "No agent operating system version found");
+                return;
+            }
+
+            let mut agent_os = agent_operating_system.to_string();
+            let mut agent_os_version = agent_operating_system_version.to_string();
+
+            agent_os = agent_os.replace(" ", "_");
+            agent_os_version = agent_os_version.replace(" ", "_");
+
+            if let Err(ex) = check_binary() {
+                create_log_entry("push_agent_updates",LOG_TYPE.info.to_string(),&format!("Error in check_binary: {}", ex));
+            }
+
+            let secops_path = Path::new(SECOPS_BINARY_DIRECTORY.as_str());
+
+            if !secops_path.is_dir() {
+                if secops_path.exists() {
+                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), &format!("A file named {} exists, attempting to remove it", *SECOPS_BINARY_DIRECTORY));
+        
+                    if let Err(ex) = fs::remove_file(secops_path) {
+                        create_log_entry( "push_agent_updates",LOG_TYPE.info.to_string(),&format!("Error removing file {}: {}", *SECOPS_BINARY_DIRECTORY, ex));
+                    }
+                }
+        
+                create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), &format!("Creating working directory {}", *SECOPS_BINARY_DIRECTORY));
+                
+                if let Err(ex) = fs::create_dir_all(secops_path) {
+                    create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), &format!("Error creating working directory {}. Exception: {}", *SECOPS_BINARY_DIRECTORY, ex));
+                } else {
+                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), &format!("Created working directory {}", *SECOPS_BINARY_DIRECTORY));
+                }
+            }
+
+            
+            
+            let agent_os_lower = agent_os.to_lowercase();
+            let update_type_lower = update_type.to_lowercase();
+
+            if agent_os_lower.contains("windows") {
+
+                let secops_windows_updater_path = format!("{}/secops_windows_updater.exe", *INSTALL_DIR);
+
+                if Path::new(&secops_windows_updater_path).exists() {
+                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), "Windows Updater binary found");
+
+                    // Launch the updater using Windows process spawning
+                    let _ = std::process::Command::new(secops_windows_updater_path)
+                        .arg(agent_id)
+                        .arg(agent_operating_system)
+                        .arg(agent_operating_system_version)
+                        .arg(update_type)
+                        .spawn()
+                        .expect("Failed to launch Windows Updater");
+
+                } else {
+                    create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(),"Windows Updater not found");
+                }
+            } else {
+                let secops_linux_updater_path = format!("{}/secops_linux_updater", *INSTALL_DIR);
+
+                if Path::new(&secops_linux_updater_path).exists() {
+                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(),"Linux Updater binary found");
+
+                    // Run the Linux updater with sudo and launch it in a new session
+                    let _ = Command::new("sudo")
+                        .arg(secops_linux_updater_path)
+                        .arg(agent_id)
+                        .arg(agent_operating_system)
+                        .arg(agent_operating_system_version)
+                        .arg(update_type)
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .expect("Failed to launch Linux Updater");
+
+                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(),"Linux Updater started");
+
+                } else {
+                    create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(),"Linux Updater not found");
+                }
+            }
+
+            if update_type_lower.contains("both") {
+                std::process::exit(0);
+            }
+            
+                
+            
+
+        }
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = get_config_file_path();
@@ -566,6 +1461,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_log_entry("main", LOG_TYPE.info.to_string(), "Agent ID not found");
     }
 
+    let binary_path = check_binary().expect("Binary not found in check_binary");
+    // create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Using binary: {}", binary_path.display()));
+    println!("Using binary: {}", binary_path.display());
+
+    let version_map = check_health();
+    println!("Version Map: {:#?}", version_map);
+    
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
 
@@ -597,7 +1499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     generate_and_share_server_keys();
 
     let handle_task_event = move |message: Payload, _| {
-        println!("Task event received");
+        
         match message {
             Payload::String(s) => {
                 println!("Task event received: {}", s);
@@ -611,7 +1513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Payload::Text(t) => {
                 // Handle text payload
-                println!("Task event received, text type payload");
+                create_log_entry("main", LOG_TYPE.info.to_string(), "Task Received for agent");
                 let mut cli_command: HashMap<String, Value> = HashMap::new();
                 let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
 
@@ -623,14 +1525,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             print!("Attempting to decrypt key: {}\n", key);
                             let decrypted_key = decrypt_message(key);
                             print!("Decrypted key: {}\n", decrypted_key);
-                            if value.is_string() && !["jwt_token", "ssh_key", "script", "secops_binary_config", "asset_details"].contains(&decrypted_key.as_str()) {
+                            if value.is_string() && !["jwt_token", "ssh_key", "script", "secops_binary_config", "asset_details", "operation"].contains(&decrypted_key.as_str()) {
                                 let decrypted_value = decrypt_message(&value.to_string());
 
                                 cli_command.insert(decrypted_key.to_string(), Value::String(decrypted_value));
                             } else {
                                 cli_command.insert(decrypted_key, value.clone());
                             }
-
                         }
                     }
 
@@ -638,18 +1539,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Failed to parse JSON from text payload.");
                 }
 
-                let mut output = HashMap::new();
-                output.insert("operation".to_string(), cli_command.get("operation").cloned().unwrap_or(Value::Null));
-                output.insert("ip_address".to_string(), cli_command.get("ip_address").cloned().unwrap_or(Value::Null));
-                output.insert("scan_type".to_string(), cli_command.get("scan_type").cloned().unwrap_or(Value::Null));
-
                 create_log_entry("handle_task_event", LOG_TYPE.info.to_string(), "Task event received");
                 print!("Task event received: {:#?}\n", cli_command);
-                // run_task(cli_command, output);
+                let cli_command_json = serde_json::to_value(cli_command).unwrap();
+                run_task(cli_command_json);
 
             }
         }
     };
+
+    initiate_local_patch_scan();
 
     loop {
         let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
@@ -680,17 +1579,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *can_send_ping_clone.lock().unwrap() = true;
             })
             .on("agent_pong", move |data, _| {   
-            let mut last_pong = last_pong_received_clone.lock().unwrap();
-            *last_pong = Instant::now();
-            println!("Agent pong received and timestamp updated to {:?}", last_pong);
+                let mut last_pong = last_pong_received_clone.lock().unwrap();
+                *last_pong = Instant::now();
+                println!("Agent pong received and timestamp updated to {:?}", last_pong);
 
             })            
             .on("task", handle_task_event)
-            // .on("health_check",handle_health_check_event)
-            // .on("uninstall", handle_uninstall_agent)
-            // .on("push_updates", handle_agent_updates)
-            .on("disconnect", move |_, _| {
-                eprintln!("Disconnected from server.");
+            .on("health_check", move |_, _| {
+                check_agent_health();
+            })
+            .on("uninstall", move |data, _| {
+                uninstall_agent(data);
+            })
+            .on("push_updates", move |data, _| {
+                push_agent_updates(data);
+            })
+            .on("disconnect", move |data, _| {
+                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Disconnected from the websocket server, error: {:#?}", data));
+            })
+            .on("error", move |data, _| {
+                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error connecting to the websocket server, error: {:#?}", data));
+            })
+            .on("close", move |data, _| {
+                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Connection to the websocket server closed, error: {:#?}", data));
             })
             .connect()
         {
@@ -719,6 +1630,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Ping management loop
         let mut time_lapsed = 0;
         let mut ping_sent = false;
+        let mut jump_host_service_polling_counter   = 0;
         loop {
             // Check if we can send ping and it's time to do so
             if time_lapsed >= CHECK_INTERVAL || time_lapsed == 0 {
@@ -758,7 +1670,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         initiate_local_scan();
 
-                        update_config_value("last_schedule_scan",&todaysDate);
+                        set_config_value("last_schedule_scan",&todaysDate);
                         let last_schedule_scan = get_config_value("last_schedule_scan");
 
                         // Traverse through the lines of config file
@@ -790,6 +1702,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                }
+            }
+            
+            if agent_mode == AGENT_MODE_JUMP_HOST {
+                if jump_host_service_polling_counter == 60 {
+                        if !is_secops_file_transfer_service_running(){
+                            create_log_entry("main", "ERROR".to_string(), "SecOps file transfer service not running. Initiating service.");
+                            initiate_secops_jump_host_service();
+                        } else {
+                            create_log_entry("main", "INFO".to_string(), "SecOps file transfer service running. Skipping service creation.");
+                        }
+                        jump_host_service_polling_counter = 0;
+                } else {
+                    jump_host_service_polling_counter += 1;
                 }
             }
 
