@@ -1675,6 +1675,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
         println!("Config loaded successfully. Agent ID: {}", agent_id);
+
+        let mut url = format!("wss://socket.app.secopsolution.com");
+
+        if base_url == "https://api.app.secopsolution.com/secops/v1.0/" {
+            url = format!("wss://socket.app.secopsolution.com");
+        } else {
+            url = base_url.replace("/secops/v1.0/","");
+            if url.contains("https://") {
+                url = url.replace("https://","wss://");
+            } else {
+                url = url.replace("http://","ws://");
+                url = url.replace("8000","5678");
+            }
+        }
         
         let url = format!("wss://socket.app.secopsolution.com");
         
