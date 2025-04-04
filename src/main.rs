@@ -1676,7 +1676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
         println!("Config loaded successfully. Agent ID: {}", agent_id);
         
-        let url = format!("http://localhost:5678");
+        let url = format!("wss://socket.app.secopsolution.com");
         
         // Shared state for connection and last pong
         let connection_successful = Arc::new(AtomicBool::new(false));
