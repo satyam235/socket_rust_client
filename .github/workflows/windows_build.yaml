@@ -1,0 +1,30 @@
+name: release-binaries
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+
+  windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          default: true
+      
+      - name: Build binary
+        run: cargo build --release
+      
+      - name: Create ZIP archive
+        run: Compress-Archive -Path target/release/socketio_example.exe -DestinationPath target/release/socketio_example-windows-x86_64.zip
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: socketio_example-windows-x86_64
+          path: target/release/socketio_example-windows-x86_64.zip
