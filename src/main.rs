@@ -1814,7 +1814,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("Error sending agent_ping: {}", e);
                     } else {
                         ping_sent = true;
-                        create_log_entry("main", LOG_TYPE.info.to_string(), "Ping sent successfully");
+                        create_log_entry("main", LOG_TYPE.info.to_string(), "Ping sent to server");
                     }
                 }
             }
