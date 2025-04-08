@@ -1698,7 +1698,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
-        let url = format!("http://127.0.0.1:5678");
+        let url = format!("http://172.28.181.199:5678");
 
         create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Connecting to the websocket server at {}", url));
         
