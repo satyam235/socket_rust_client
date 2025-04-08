@@ -49,6 +49,8 @@ static FAILED_SOCKET_CONNECTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static MAX_FAILED_SOCKET_CONNECTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(30);
 
 
+
+
 pub struct log_type {
     info: String,
     error: String,
@@ -397,6 +399,8 @@ fn decrypt_message(encrypted_message: &str) -> String {
         }
     };
 
+    let encrypted_message = encrypted_message.trim().trim_matches('"');
+
     println!("Attempting to decode Base64: {}", encrypted_message);
 
     let encrypted_data = match base64::decode(encrypted_message.trim()) {
@@ -556,8 +560,9 @@ fn initiate_local_scan() {
         "full_scan": true
     });
     
-    create_log_entry("initiate_local_scan",LOG_TYPE.info.to_string(),"Initiating local scan");
-    run_task(task);
+    create_log_entry("initiate_local_scan",LOG_TYPE.info.to_string(),"Initiating local vulnerability scan");
+    let cli_command_json = serde_json::to_value(task).unwrap();
+    run_task(cli_command_json);
 
 }
 
@@ -572,7 +577,8 @@ fn initiate_local_patch_scan() {
         "full_scan": true
     });
     create_log_entry("initiate_local_patch_scan",LOG_TYPE.info.to_string(),"Initiating local patch scan");
-    run_task(task);
+    let cli_command_json = serde_json::to_value(task).unwrap();
+    run_task(cli_command_json);
 }
 
 fn get_config_value(key: &str) -> Option<String> {
@@ -1073,6 +1079,8 @@ fn run_task(task_json:Value)  {
 
     create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Attempting to run task using : {}", cli_binary_path.display()));
 
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Attempting to run task :{:?}", task_json));
+
     // check if the file cli_binary_path exists or not if not download it
     // if !Path::new(&cli_binary_path).exists() {
     //     download_secops_agent_binary("secops_cli_ubuntu-20.04",TEMP_DIR.as_str(),false);
@@ -1089,7 +1097,7 @@ fn run_task(task_json:Value)  {
     }
 
     if operation == "schedule_local_scan"{
-        let schedule_time = task_json["schedule_time"].as_str().unwrap_or("").to_string();
+        let schedule_time = task_json["scheduled_time"].as_str().unwrap_or("").to_string();
         if schedule_time.is_empty() {
             create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Schedule Time Specified");
             return;
@@ -1585,7 +1593,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
 
@@ -1645,7 +1652,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(obj) = json_data[0].as_object() {
                         for (key, value) in obj {
                             let decrypted_key = decrypt_message(key);
-                            if value.is_string() && !["jwt_token", "ssh_key", "script", "secops_binary_config", "asset_details", "operation"].contains(&decrypted_key.as_str()) {
+                            if value.is_string() && !["jwt_token", "ssh_key", "script", "secops_binary_config", "asset_details"].contains(&decrypted_key.as_str()) {
                                 let decrypted_value = decrypt_message(&value.to_string());
                                 cli_command.insert(decrypted_key.to_string(), Value::String(decrypted_value));
                             } else {
@@ -1660,6 +1667,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let cli_command_json = serde_json::to_value(cli_command).unwrap();
+                println!("CLI Command JSON: {}", cli_command_json);
                 run_task(cli_command_json);
 
             }
@@ -1690,8 +1698,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
-        let url = format!("wss://socket.app.secopsolution.com");
+        let url = format!("http://127.0.0.1:5678");
+
+        create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Connecting to the websocket server at {}", url));
         
+        let current_socket: Arc<Mutex<Option<RawClient>>> = Arc::new(Mutex::new(None));
+        let current_socket_clone = Arc::clone(&current_socket);
+
         // Shared state for connection and last pong
         let connection_successful = Arc::new(AtomicBool::new(false));
         let connection_successful_clone = Arc::clone(&connection_successful);
@@ -1702,15 +1715,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Flag to control ping sending
         let can_send_ping = Arc::new(Mutex::new(false));
         let can_send_ping_clone = Arc::clone(&can_send_ping);
+
+        if let Some(prev_socket) = current_socket.lock().unwrap().take() {
+            prev_socket.disconnect();
+        }
         
         let socket = match ClientBuilder::new(&url)
             .namespace("/")
             .reconnect(false)
+            .reconnect_on_disconnect(false)
             .opening_header("agentID", HeaderValue::from_str(&agent_id).unwrap())
             .on("open", move |message, client| {
                 client.emit("subscribe", json!({"room": agent_id, "version": VERSION}));
                 connection_successful_clone.store(true, Ordering::Relaxed);
                 *can_send_ping_clone.lock().unwrap() = true;
+                let mut socket_guard = current_socket_clone.lock().unwrap();
+                *socket_guard = Some(client.clone());
                 create_log_entry("main", LOG_TYPE.info.to_string(), "Connected to the websocket server");
                 reset_failed_attempts();
             })
@@ -1734,20 +1754,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error connecting to the websocket server, error: {:#?}", data));
                 increment_failed_attempts();
             })
-            .on("close", move |data, _| {
-                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Connection to the websocket server closed, error: {:#?}", data));
-                increment_failed_attempts();
+            .on("close", {
+                let current_socket_clone = Arc::clone(&current_socket);
+                move |data, _| {
+                    create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Connection to the websocket server closed, error: {:#?}", data));
+                    increment_failed_attempts();
+                    let mut socket_guard = current_socket_clone.lock().unwrap();
+                    *socket_guard = None;
+                }
             })
             .connect()
-        {
-            Ok(socket) => socket,
-            Err(e) => {
-                increment_failed_attempts();
-                eprintln!("Failed to connect: {}. Retrying in 10 seconds...", e);
-                thread::sleep(Duration::from_secs(10));
-                continue;
-            }
-        };
+            {
+                Ok(socket) => {
+                    // Close the previous connection if it exists
+                    if let Some(prev_socket) = current_socket.lock().unwrap().take() {
+                        prev_socket.disconnect();
+                    }
+            
+                    socket
+                }
+                Err(e) => {
+                    increment_failed_attempts();
+                    eprintln!("Failed to connect: {}. Retrying in 10 seconds...", e);
+                    thread::sleep(Duration::from_secs(10));
+                    continue;
+                }
+            };
 
         
         
@@ -1768,6 +1800,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ping_sent = false;
         let mut jump_host_service_polling_counter   = 0;
         loop {
+
+            
             // Check if we can send ping and it's time to do so
             if time_lapsed >= CHECK_INTERVAL || time_lapsed == 0 {
                 time_lapsed = 0;
@@ -1780,6 +1814,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("Error sending agent_ping: {}", e);
                     } else {
                         ping_sent = true;
+                        create_log_entry("main", LOG_TYPE.info.to_string(), "Ping sent successfully");
                     }
                 }
             }
@@ -1867,6 +1902,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if elapsed_since_pong > PONG_TIMEOUT {
                 eprintln!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT);
                 increment_failed_attempts();
+                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT));
+                socket.disconnect();
                 break;
             }
 
