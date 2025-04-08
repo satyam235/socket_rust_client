@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 
 
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
-const CHECK_INTERVAL: u64 = 30;
+const CHECK_INTERVAL: u64 = 3;
 const PONG_TIMEOUT: u64 = 30;
 const VERSION: &str = "V1.0.36";
 const AGENT_MODE_ENDPOINT :&str = "ENDPOINT";
@@ -1097,7 +1097,7 @@ fn run_task(task_json:Value)  {
     }
 
     if operation == "schedule_local_scan"{
-        let schedule_time = task_json["scheduled_time"].as_str().unwrap_or("").to_string();
+        let schedule_time = task_json["scheduled_time"].as_str().unwrap_or("None").to_string();
         if schedule_time.is_empty() {
             create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Schedule Time Specified");
             return;
@@ -1824,60 +1824,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             
             // Check scheduled time if applicable
-            if let Some(ref sched_time) = scheduled_time{
-                if let Ok(sched_time) = chrono::NaiveTime::parse_from_str(&sched_time, "%H:%M:%S") {
-                    // convert sched_time to utc
-                    let today = Utc::now().date_naive();
-                    let sched_datetime = Utc.from_utc_datetime(
-                        &today.and_time(sched_time)
-                    );
-                    let now = Utc::now().time();
-                    let todaysDate = Utc::now().date_naive().to_string();  
-                    // let todaysDate_reference = todaysDate; 
+            if let Some(ref sched_time) = scheduled_time {
+                if let Ok(sched_time_parsed) = chrono::NaiveTime::parse_from_str(sched_time, "%H:%M:%S") {
+                    // Get current time in UTC timezone
+                    let now_utc = Utc::now();
+                    let now_naive_utc = now_utc.time();
+                    let todays_date = now_utc.date_naive().to_string();
                     
-                    if (last_schedule_scan.is_none() || last_schedule_scan.as_deref() == Some("None") || last_schedule_scan.as_deref() != Some(&todaysDate)) && now >= sched_time {
+                    // For debugging
+                    create_log_entry(
+                        "main", 
+                        LOG_TYPE.info.to_string(), 
+                        &format!(
+                            "Checking scheduled scan: scheduled_time={}, current_utc_time={}, last_scan={}", 
+                            sched_time, now_naive_utc, last_schedule_scan.as_deref().unwrap_or("None")
+                        )
+                    );
+                    
+                    // Compare times directly in UTC context
+                    if (last_schedule_scan.is_none() || 
+                        last_schedule_scan.as_deref() == Some("None") || 
+                        last_schedule_scan.as_deref() != Some(&todays_date)) && 
+                        now_naive_utc >= sched_time_parsed {
                         
-                        println!("Scheduled scan triggered at {}", now);
+                        println!("Scheduled scan triggered at {} UTC", now_utc);
+                        create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Scheduled scan triggered at {} UTC", now_utc));
                         
                         initiate_local_scan();
 
-                        set_config_value("last_schedule_scan",&todaysDate);
+                        set_config_value("last_schedule_scan", &todays_date);
                         let last_schedule_scan = get_config_value("last_schedule_scan");
 
-                        // Traverse through the lines of config file
-                        if let Ok(mut file) = File::open(&config_path) {
-                            let mut lines = String::new();
-                            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                                // Split the file content into lines
-                                let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-                                let mut updated_lines = Vec::new();
-                                let mut found = false;
-                                
-                                // Process each line
-                                for line in lines {
-                                    if line.starts_with("last_schedule_scan=") && !found {
-                                        // Replace only the first occurrence of last_schedule_scan
-                                        updated_lines.push(format!("last_schedule_scan={}", last_schedule_scan.clone().unwrap()));
-                                        found = true; // Mark that we've replaced it once
-                                    } else {
-                                        // Keep all other lines unchanged
-                                        updated_lines.push(line);
-                                    }
+                        // Update the config file
+                        if let Ok(content) = std::fs::read_to_string(&config_path) {
+                            let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+                            let mut updated_lines = Vec::new();
+                            let mut found = false;
+                            
+                            for line in lines {
+                                if line.starts_with("last_schedule_scan=") && !found {
+                                    updated_lines.push(format!("last_schedule_scan={}", last_schedule_scan.clone().unwrap()));
+                                    found = true;
+                                } else {
+                                    updated_lines.push(line);
                                 }
-                                
-                                // Join the lines back together and write to file
-                                let updated_content = updated_lines.join("\n") + "\n"; // Add newline at end
-                                if let Err(e) = std::fs::write(&config_path, updated_content) {
-                                    eprintln!("Error writing to config file: {}", e);
-                                }
+                            }
+                            
+                            let updated_content = updated_lines.join("\n") + "\n";
+                            if let Err(e) = std::fs::write(&config_path, updated_content) {
+                                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error writing to config file: {}", e));
                             }
                         }
                     }
                 }
             }
-            
+
             if agent_mode == AGENT_MODE_JUMP_HOST {
-                if jump_host_service_polling_counter == 60 {
+                if jump_host_service_polling_counter == 6 {
                         if !is_secops_file_transfer_service_running(){
                             create_log_entry("main", "ERROR".to_string(), "SecOps file transfer service not running. Initiating service.");
                             initiate_secops_jump_host_service();
@@ -1912,7 +1915,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ping_sent = false;
             }
 
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_secs(10));
         }
     }
 }
