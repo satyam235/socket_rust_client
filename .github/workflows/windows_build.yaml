@@ -6,6 +6,9 @@ on:
 jobs:
   windows-x86_64:
     runs-on: windows-latest
+    # Add permissions block for releases
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       
