@@ -1178,6 +1178,7 @@ fn run_task(task_json:Value)  {
     file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
 
     let config_path = format!("{}/task_config.json", TEMP_DIR.as_str());
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task config file created at: {}", config_path));
     let mut command_args = vec!["-configPath", &config_path];
 
     // Spawn the process
