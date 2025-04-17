@@ -1129,7 +1129,7 @@ fn run_task(task_json:Value)  {
     if argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
 
         let current_timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
-        let temp_dir = format!("{}/secops", TEMP_DIR.as_str());
+        let temp_dir = format!("{}", TEMP_DIR.as_str());
 
         // Ensure secops directory exists
         if !Path::new(&temp_dir).exists() {
