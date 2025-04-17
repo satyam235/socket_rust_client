@@ -1900,8 +1900,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let last_pong = *last_pong_received.lock().unwrap();
             let elapsed_since_pong = last_pong.elapsed().as_secs();
             
-            // println!("Elapsed since last pong: {} seconds", elapsed_since_pong);
-            
             if elapsed_since_pong > PONG_TIMEOUT {
                 eprintln!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT);
                 increment_failed_attempts();
