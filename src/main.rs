@@ -1129,17 +1129,17 @@ fn run_task(task_json:Value)  {
     if !argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
 
         let current_timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
-        let temp_dir = env::temp_dir().join("secops");
+        let temp_dir = format!("{}/secops", TEMP_DIR.as_str());
 
         // Ensure secops directory exists
-        if !temp_dir.exists() {
+        if !Path::new(&temp_dir).exists() {
             fs::create_dir_all(&temp_dir).expect("Failed to create secops directory");
         }
 
         let secops_binary_config_file_path = if operation == "config_audit_scan" {
-            temp_dir.join(format!("SecOpsConfigAuditBinaryConfig_{}.json", current_timestamp))
+            Path::new(&temp_dir).join(format!("SecOpsConfigAuditBinaryConfig_{}.json", current_timestamp))
         } else {
-            temp_dir.join(format!("SecOpsPatchBinaryConfig_{}.json", current_timestamp))
+            Path::new(&temp_dir).join(format!("SecOpsPatchBinaryConfig_{}.json", current_timestamp))
         };
 
         if let Some(secops_binary_config) = argument_dict.get_mut(&operation) {
@@ -1173,7 +1173,12 @@ fn run_task(task_json:Value)  {
 
     let argument_dict_str = serde_json::to_string(&argument_dict).unwrap();
 
-    let mut command_args = vec!["-cm", &argument_dict_str];
+    // write this json to a file
+    let mut file = File::create(format!("{}/task_config.json", TEMP_DIR.as_str())).unwrap();
+    file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
+
+    let config_path = format!("{}/task_config.json", TEMP_DIR.as_str());
+    let mut command_args = vec!["-configPath", &config_path];
 
     // Spawn the process
     let _cli_process = Command::new(cli_binary_path)
@@ -1184,8 +1189,6 @@ fn run_task(task_json:Value)  {
         .expect("Failed to start process");
 
     // Handle the spawned process (e.g., read output)
-
-
     create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task executed successfully"));
 
    
