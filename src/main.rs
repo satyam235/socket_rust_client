@@ -75,7 +75,7 @@ lazy_static::lazy_static! {
     pub static ref SERVER_SECRET_KEY: String = "1taeEsDrioWlGRPsUT6KITKc/z+Je1WPkC8PBMM3PCE=".to_string();
 
     pub static ref TEMP_DIR: String = if cfg!(target_os = "windows") {
-        env::temp_dir().to_string_lossy().to_string()
+        "C:\\Windows\\Temp".to_string()
     } else {
         "/tmp".to_string()
     };
@@ -1174,12 +1174,16 @@ fn run_task(task_json:Value)  {
     let argument_dict_str = serde_json::to_string(&argument_dict).unwrap();
 
     // write this json to a file
-    let mut file = File::create(format!("{}/task_config.json", TEMP_DIR.as_str())).unwrap();
+    let mut file = File::create(format!("{}\\task_config.json", TEMP_DIR.as_str())).unwrap();
     file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
 
-    let config_path = format!("{}/task_config.json", TEMP_DIR.as_str());
+    let config_path = format!("{}\\task_config.json", TEMP_DIR.as_str());
     create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task config file created at: {}", config_path));
     let mut command_args = vec!["-configPath", &config_path];
+
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Command Args: {:?}", command_args));
+    // Check if the operation is "local_scan" or "local_patch_scan"
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("CLI Binary Path: {}", cli_binary_path.display()));
 
     // Spawn the process
     let _cli_process = Command::new(cli_binary_path)
