@@ -1125,10 +1125,12 @@ fn run_task(task_json:Value)  {
         .unwrap()
         .insert("Agent_ID".to_string(), Value::String(agent_id.to_string()));
 
+    let current_timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
+
     // check if secops_binary_config is in the argument_dict[operation]
     if argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
 
-        let current_timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
+        
         let temp_dir = format!("{}", TEMP_DIR.as_str());
 
         // Ensure secops directory exists
@@ -1180,10 +1182,10 @@ fn run_task(task_json:Value)  {
     let argument_dict_str = serde_json::to_string(&argument_dict).unwrap();
 
     // write this json to a file
-    let mut file = File::create(format!("{}\\task_config.json", TEMP_DIR.as_str())).unwrap();
+    let mut file = File::create(format!("{}\\task_config_{}.json", TEMP_DIR.as_str(), current_timestamp)).unwrap();
     file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
 
-    let config_path = format!("{}\\task_config.json", TEMP_DIR.as_str());
+    let config_path = format!("{}\\task_config_{}.json", TEMP_DIR.as_str(), current_timestamp);
     create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task config file created at: {}", config_path));
     let mut command_args = vec!["-configPath", &config_path];
 
