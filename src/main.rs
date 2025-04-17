@@ -1126,7 +1126,7 @@ fn run_task(task_json:Value)  {
         .insert("Agent_ID".to_string(), Value::String(agent_id.to_string()));
 
     // check if secops_binary_config is in the argument_dict[operation]
-    if !argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
+    if argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
 
         let current_timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
         let temp_dir = format!("{}/secops", TEMP_DIR.as_str());
@@ -1165,6 +1165,12 @@ fn run_task(task_json:Value)  {
                     );
 
                     secops_binary_config.as_object_mut().unwrap().remove("secops_binary_config");
+                    argument_dict
+                        .entry(operation.to_string())
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("secops_binary_config_file_path".to_string(), Value::String(secops_binary_config_file_path.to_string_lossy().into_owned()));
                 }
             }
         }
