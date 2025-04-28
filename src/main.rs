@@ -5,7 +5,7 @@ use std::{env, fs, process, time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
 use reqwest::header::HeaderValue;
-use chrono::{format, Local, NaiveTime, Utc};
+use chrono::{format, Local, NaiveTime, Utc, Timelike};
 use std::collections::HashMap;
 use chrono::{DateTime, TimeZone};
 use std::io::{Read, Write}; 
@@ -155,6 +155,137 @@ lazy_static! {
     static ref SERVER_PUBLIC_KEY: Mutex<Option<RsaPublicKey>> = Mutex::new(None);
     static ref MAX_NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(10);
     static ref NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(0);
+}
+
+// Add at the beginning of main.rs with other imports
+use std::sync::atomic::{AtomicU64};
+
+// Connection state enum
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
+}
+
+// Connection manager struct
+struct ConnectionManager {
+    state: Arc<Mutex<ConnectionState>>,
+    last_pong: Arc<Mutex<Instant>>,
+    can_send_ping: Arc<Mutex<bool>>,
+    backoff_seconds: Arc<AtomicU64>,
+    socket: Arc<Mutex<Option<client::Client>>>,
+    connection_id: Arc<AtomicUsize>,
+}
+
+impl ConnectionManager {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
+            last_pong: Arc::new(Mutex::new(Instant::now())),
+            can_send_ping: Arc::new(Mutex::new(false)),
+            backoff_seconds: Arc::new(AtomicU64::new(1)),
+            socket: Arc::new(Mutex::new(None)),
+            connection_id: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        *state == ConnectionState::Connected
+    }
+
+    fn set_state(&self, new_state: ConnectionState) {
+        let mut state = self.state.lock().unwrap();
+        *state = new_state;
+    }
+
+    fn get_connection_id(&self) -> usize {
+        self.connection_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn set_socket(&self, socket: Option<client::Client>) {
+        let mut sock = self.socket.lock().unwrap();
+        *sock = socket;
+    }
+
+    fn get_socket(&self) -> Option<client::Client> {
+        let sock = self.socket.lock().unwrap();
+        sock.clone()
+    }
+
+    fn register_pong(&self) {
+        let mut last_pong = self.last_pong.lock().unwrap();
+        *last_pong = Instant::now();
+        create_log_entry("connection_manager", LOG_TYPE.info.to_string(), 
+            &format!("Pong received at {:?}", *last_pong));
+    }
+
+    fn allow_ping(&self, allow: bool) {
+        let mut can_ping = self.can_send_ping.lock().unwrap();
+        *can_ping = allow;
+    }
+
+    fn can_ping(&self) -> bool {
+        let can_ping = self.can_send_ping.lock().unwrap();
+        *can_ping
+    }
+
+    fn time_since_last_pong(&self) -> Duration {
+        let last_pong = self.last_pong.lock().unwrap();
+        last_pong.elapsed()
+    }
+
+    fn reset_backoff(&self) {
+        self.backoff_seconds.store(1, Ordering::SeqCst);
+    }
+
+    fn increase_backoff(&self) -> u64 {
+        let current = self.backoff_seconds.load(Ordering::SeqCst);
+        let next = std::cmp::min(current * 2, 120); // Max backoff of 2 minutes
+        self.backoff_seconds.store(next, Ordering::SeqCst);
+        next
+    }
+
+    fn get_backoff(&self) -> Duration {
+        Duration::from_secs(self.backoff_seconds.load(Ordering::SeqCst))
+    }
+
+    fn disconnect(&self) {
+        if let Some(socket) = self.get_socket() {
+            self.set_state(ConnectionState::Disconnected);
+            socket.disconnect();
+        }
+        self.set_socket(None);
+    }
+}
+
+fn build_websocket_url() -> String {
+    let base_url = get_config_value("BASE_URL").expect("BASE_URL not found in config");
+    
+    if base_url == "https://api.app.secopsolution.com/secops/v1.0/" {
+        return "wss://socket.app.secopsolution.com".to_string();
+    }
+    
+    let mut url = base_url.replace("/secops/v1.0/", "");
+    
+    // Ensure we're using WebSocket protocol
+    if url.contains("https://") {
+        url = url.replace("https://", "wss://");
+    } else if url.contains("http://") {
+        url = url.replace("http://", "ws://");
+        // Replace port 8000 with 5678 if present
+        if url.contains(":8000") {
+            url = url.replace(":8000", ":5678");
+        }
+    }
+    let url = format!("http://172.28.181.199:5678");
+    create_log_entry("build_websocket_url", LOG_TYPE.info.to_string(), 
+                     &format!("Using WebSocket URL: {}", url));
+    
+    url
 }
 
 fn escape_ansi(line: &str) -> String {
@@ -1238,7 +1369,7 @@ fn check_secops_uninstaller_binary_exists() -> bool {
     false
 }
 
-fn uninstall_agent(data: Payload) {
+fn uninstall_agent(data: Payload, _client: RawClient) {
     
     match data {
 
@@ -1333,7 +1464,7 @@ fn uninstall_agent(data: Payload) {
     }
 }
 
-fn push_agent_updates(data: Payload) {
+fn push_agent_updates(data: Payload, _client: RawClient) {
     
     match data {
 
@@ -1605,6 +1736,264 @@ fn restart_secops_service() {
     }
 }
 
+fn connect_to_socket_server(manager: Arc<ConnectionManager>, connection_id: usize) 
+    -> Result<rust_socketio::client::Client, Box<dyn std::error::Error>> {
+    
+    let url = build_websocket_url();
+    let agent_id = get_config_value("A_ID").expect("Agent ID not found in config");
+    
+    create_log_entry("connect_to_socket_server", LOG_TYPE.info.to_string(),
+                     &format!("Connection attempt #{} to {}", connection_id, url));
+    
+    // Set state to connecting
+    manager.set_state(ConnectionState::Connecting);
+    
+    let manager_clone = Arc::clone(&manager);
+    let connection_state_open = Arc::clone(&manager.state);
+    let connection_state_close = Arc::clone(&manager.state); 
+    let connection_state_error = Arc::clone(&manager.state);
+    let last_pong_received = Arc::clone(&manager.last_pong);
+    let can_send_ping = Arc::clone(&manager.can_send_ping);
+
+    let handle_task_event = move |message: Payload, _: rust_socketio::RawClient| {
+
+        create_log_entry("main", LOG_TYPE.info.to_string(), "Task event received");
+        
+        match message {
+            Payload::String(s) => {
+                let json_data: serde_json::Value = serde_json::from_str(&s).unwrap();
+                let task_id = json_data["task_id"].as_str().unwrap_or_default();
+            }
+            Payload::Binary(_) => {
+                // Handle binary payload
+                println!("Task event received, binary type payload");
+            }
+            Payload::Text(t) => {
+                // Handle text payload
+                let mut cli_command: HashMap<String, Value> = HashMap::new();
+                let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
+
+                if let Ok(json_data) = serde_json::from_str::<Value>(&json_str) {
+                    create_log_entry("handle_task_event", LOG_TYPE.info.to_string(), &format!("Task event received: {}", json_str));
+                    if let Some(obj) = json_data[0].as_object() {
+                        for (key, value) in obj {
+                            let decrypted_key = decrypt_message(key);
+                            if value.is_string() && !["jwt_token", "ssh_key", "script", "secops_binary_config", "asset_details"].contains(&decrypted_key.as_str()) {
+                                let decrypted_value = decrypt_message(&value.to_string());
+                                cli_command.insert(decrypted_key.to_string(), Value::String(decrypted_value));
+                            } else {
+                                cli_command.insert(decrypted_key, value.clone());
+                            }
+                        }
+                    }
+
+                } else {
+                    println!("Failed to parse JSON from text payload.");
+                    create_log_entry("handle_task_event", LOG_TYPE.error.to_string(), "message failed to parse json");
+                }
+
+                let cli_command_json = serde_json::to_value(cli_command).unwrap();
+                println!("CLI Command JSON: {}", cli_command_json);
+                run_task(cli_command_json);
+
+            }
+        }
+    };
+    
+    // Define socket event handlers
+    let socket = ClientBuilder::new(&url)
+        .namespace("/")
+        .reconnect(false)  // We'll handle reconnection ourselves
+        .reconnect_on_disconnect(false)
+        .opening_header("agentID", HeaderValue::from_str(&agent_id).unwrap())
+        .on("open", move |_, client| {
+            let mut state = connection_state_open.lock().unwrap();
+            *state = ConnectionState::Connected;
+            
+            let mut can_ping = can_send_ping.lock().unwrap();
+            *can_ping = true;
+            
+            create_log_entry("socket_event", LOG_TYPE.info.to_string(), 
+                             &format!("Connection #{} established successfully", connection_id));
+            reset_failed_attempts();
+        })
+        .on("agent_pong", move |_, _| {   
+            manager_clone.register_pong();
+        })            
+        .on("task", handle_task_event)
+        .on("health_check", |_, _| {
+            check_agent_health();
+        })
+        .on("error", {
+            let connection_id = connection_id;
+            move |data, _| {
+                create_log_entry("socket_event", LOG_TYPE.error.to_string(), 
+                                &format!("Connection #{} error: {:#?}", connection_id, data));
+            }
+        })
+        .on("close", {
+            let connection_id = connection_id;
+            move |data, _| {
+                create_log_entry("socket_event", LOG_TYPE.error.to_string(), 
+                                &format!("Connection #{} closed: {:#?}", connection_id, data));
+                let mut state = connection_state_close.lock().unwrap();
+                *state = ConnectionState::Disconnected;
+                increment_failed_attempts();
+            }
+        })
+        .connect()?;
+    
+    Ok(socket)
+}
+
+fn main_event_loop(socket: &client::Client, manager: Arc<ConnectionManager>, agent_mode: &str, config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+
+    let mut time_lapsed = 0;
+    let mut ping_sent = false;
+    let mut jump_host_service_polling_counter = 0;
+
+    // Register initial pong time
+    manager.register_pong();
+
+    while manager.is_connected() {
+    // Check if we can send ping and it's time to do so
+    if time_lapsed >= CHECK_INTERVAL || time_lapsed == 0 {
+    time_lapsed = 0;
+
+    // Only send ping if allowed and not already sent
+    if manager.can_ping() && !ping_sent {
+    create_log_entry("main_event_loop", LOG_TYPE.info.to_string(), "Sending agent_ping");
+    
+    if let Err(e) = socket.emit("agent_ping", json!({})) {
+        create_log_entry("main_event_loop", LOG_TYPE.error.to_string(), 
+                        &format!("Error sending agent_ping: {}", e));
+        return Err(e.into());
+    } else {
+        ping_sent = true;
+        create_log_entry("main_event_loop", LOG_TYPE.info.to_string(), "Ping sent to server");
+    }
+    }
+    }
+
+    // Handle scheduled scans
+    process_scheduled_scans(config_path)?;
+
+    // Handle jump host service if needed
+    if agent_mode == AGENT_MODE_JUMP_HOST {
+    if jump_host_service_polling_counter >= 6 {
+    if !is_secops_file_transfer_service_running() {
+        create_log_entry("main_event_loop", LOG_TYPE.error.to_string(), 
+                        "SecOps file transfer service not running. Initiating service.");
+        initiate_secops_jump_host_service();
+    } else {
+        create_log_entry("main_event_loop", LOG_TYPE.info.to_string(), 
+                        "SecOps file transfer service running. Skipping service creation.");
+    }
+    jump_host_service_polling_counter = 0;
+    } else {
+    jump_host_service_polling_counter += 1;
+    }
+    }
+
+    // Increment time and check for ping interval
+    time_lapsed += 1;
+
+    // Check for pong timeout with precise tracking
+    let elapsed_since_pong = manager.time_since_last_pong().as_secs();
+
+    if elapsed_since_pong > PONG_TIMEOUT {
+    create_log_entry("main_event_loop", LOG_TYPE.error.to_string(), 
+                &format!("No pong received in {} seconds. Closing connection.", PONG_TIMEOUT));
+    increment_failed_attempts();
+    return Err("Pong timeout exceeded".into());
+    }
+
+    // Reset ping_sent if pong received recently
+    if ping_sent && elapsed_since_pong < 5 {
+    ping_sent = false;
+    }
+
+    // Sleep to avoid tight loop
+    thread::sleep(Duration::from_secs(10));
+    }
+
+    Ok(())
+
+}
+
+fn process_scheduled_scans(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let scheduled_time = get_config_value("scheduled_time");
+    let last_schedule_scan = get_config_value("last_schedule_scan");
+    
+    // Check scheduled time if applicable
+    if let Some(ref sched_time) = scheduled_time {
+        if let Ok(sched_time_parsed) = chrono::NaiveTime::parse_from_str(sched_time, "%H:%M:%S") {
+            // Get current time in UTC timezone
+            let now_utc = Utc::now();
+            let now_naive_utc = now_utc.time();
+            let todays_date = now_utc.date_naive().to_string();
+            
+            // Only log every 5 minutes to avoid excessive logging
+            if now_naive_utc.minute() % 5 == 0 && now_naive_utc.second() < 10 {
+                create_log_entry(
+                    "process_scheduled_scans", 
+                    LOG_TYPE.info.to_string(), 
+                    &format!(
+                        "Checking schedule: time={}, current={}, last_scan={}", 
+                        sched_time, now_naive_utc, last_schedule_scan.as_deref().unwrap_or("None")
+                    )
+                );
+            }
+            
+            // Compare times in UTC context and check if scan should run
+            if (last_schedule_scan.is_none() || 
+                last_schedule_scan.as_deref() == Some("None") || 
+                last_schedule_scan.as_deref() != Some(&todays_date)) && 
+                now_naive_utc >= sched_time_parsed {
+                
+                create_log_entry("process_scheduled_scans", LOG_TYPE.info.to_string(), 
+                                 &format!("Scheduled scan triggered at {} UTC", now_utc));
+                
+                // Run the scan
+                initiate_local_scan();
+
+                // Update the last scan time
+                set_config_value("last_schedule_scan", &todays_date);
+                
+                // Update the config file
+                update_config_file(config_path, "last_schedule_scan", &todays_date)?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn update_config_file(config_path: &str, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(config_path)?;
+    let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    let mut updated_lines = Vec::new();
+    let mut found = false;
+    
+    for line in lines {
+        if line.starts_with(&format!("{}=", key)) && !found {
+            updated_lines.push(format!("{}={}", key, value));
+            found = true;
+        } else {
+            updated_lines.push(line);
+        }
+    }
+    
+    // If the key wasn't found, add it
+    if !found {
+        updated_lines.push(format!("{}={}", key, value));
+    }
+    
+    let updated_content = updated_lines.join("\n") + "\n";
+    std::fs::write(config_path, updated_content)?;
+    
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -1630,9 +2019,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = get_config_file_path();
     read_config(config_path.as_str());
-
     remove_config_sh();
-
     prepare_working_dirs();
 
     create_log_entry("main", LOG_TYPE.info.to_string(), "SecOps Agent Service Started");
@@ -1655,8 +2042,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     generate_and_share_server_keys();
+    check_agent_health();
+    initiate_local_patch_scan();
+    set_max_failed_attempts(30);
 
-    let handle_task_event = move |message: Payload, _| {
+    let handle_task_event = move |message: Payload, _: rust_socketio::RawClient| {
 
         create_log_entry("main", LOG_TYPE.info.to_string(), "Task event received");
         
@@ -1701,245 +2091,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    check_agent_health();
-
-    initiate_local_patch_scan();
-
-    set_max_failed_attempts(30);
+    let connection_manager = Arc::new(ConnectionManager::new());
 
     loop {
         let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
-        println!("Config loaded successfully. Agent ID: {}", agent_id);
-
-        let mut url = format!("wss://socket.app.secopsolution.com");
-
-        if base_url == "https://api.app.secopsolution.com/secops/v1.0/" {
-            url = format!("wss://socket.app.secopsolution.com");
-        } else {
-            url = base_url.replace("/secops/v1.0/","");
-            if url.contains("https://") {
-                url = url.replace("https://","wss://");
-            } else {
-                url = url.replace("http://","ws://");
-                url = url.replace("8000","5678");
-            }
-        }
         
-        let url = format!("http://172.28.181.199:5678");
-
-        create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Connecting to the websocket server at {}", url));
-        
-        let current_socket: Arc<Mutex<Option<RawClient>>> = Arc::new(Mutex::new(None));
-        let current_socket_clone = Arc::clone(&current_socket);
-
-        // Shared state for connection and last pong
-        let connection_successful = Arc::new(AtomicBool::new(false));
-        let connection_successful_clone = Arc::clone(&connection_successful);
-        
-        let last_pong_received = Arc::new(Mutex::new(Instant::now()));
-        let last_pong_received_clone = Arc::clone(&last_pong_received);
-        
-        // Flag to control ping sending
-        let can_send_ping = Arc::new(Mutex::new(false));
-        let can_send_ping_clone = Arc::clone(&can_send_ping);
-
-        if let Some(prev_socket) = current_socket.lock().unwrap().take() {
-            prev_socket.disconnect();
-        }
-        
-        let socket = match ClientBuilder::new(&url)
-            .namespace("/")
-            .reconnect(false)
-            .reconnect_on_disconnect(false)
-            .opening_header("agentID", HeaderValue::from_str(&agent_id).unwrap())
-            .on("open", move |message, client| {
-                connection_successful_clone.store(true, Ordering::Relaxed);
-                *can_send_ping_clone.lock().unwrap() = true;
-                let mut socket_guard = current_socket_clone.lock().unwrap();
-                *socket_guard = Some(client.clone());
-                create_log_entry("main", LOG_TYPE.info.to_string(), "Connected to the websocket server");
-                reset_failed_attempts();
-            })
-            .on("agent_pong", move |data, _| {   
-                let mut last_pong = last_pong_received_clone.lock().unwrap();
-                *last_pong = Instant::now();
-                println!("Agent pong received and timestamp updated to {:?}", last_pong);
-
-            })            
-            .on("task", handle_task_event)
-            .on("health_check", move |_, _| {
-                check_agent_health();
-            })
-            .on("uninstall", move |data, _| {
-                uninstall_agent(data);
-            })
-            .on("push_updates", move |data, _| {
-                push_agent_updates(data);
-            })
-            .on("error", move |data, _| {
-                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error connecting to the websocket server, error: {:#?}", data));
-                increment_failed_attempts();
-            })
-            .on("close", {
-                let current_socket_clone = Arc::clone(&current_socket);
-                move |data, _| {
-                    create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Connection to the websocket server closed, error: {:#?}", data));
-                    increment_failed_attempts();
-                    let mut socket_guard = current_socket_clone.lock().unwrap();
-                    *socket_guard = None;
-                }
-            })
-            .connect()
-            {
-                Ok(socket) => {
-                    // Close the previous connection if it exists
-                    if let Some(prev_socket) = current_socket.lock().unwrap().take() {
-                        prev_socket.disconnect();
-                    }
+        if !connection_manager.is_connected() {
+            create_log_entry("main", LOG_TYPE.info.to_string(), "Attempting to connect to socket server");
+            let connection_id = connection_manager.get_connection_id();
             
-                    socket
-                }
+            match connect_to_socket_server(Arc::clone(&connection_manager), connection_id) {
+                Ok(socket) => {
+                    // Subscribe to agent room first before moving the socket
+                    if let Err(e) = socket.emit("subscribe", json!({"room": agent_id})) {
+                        create_log_entry("main", LOG_TYPE.error.to_string(), 
+                                         &format!("Failed to subscribe to room: {}", e));
+                    }
+                    
+                    // Now store the socket in the manager
+                    connection_manager.set_socket(Some(socket));
+                    connection_manager.set_state(ConnectionState::Connected);
+                    connection_manager.reset_backoff();
+                    reset_failed_attempts();
+                    // Get a clone of the socket for the main event loop
+                    if let Some(ref socket) = connection_manager.get_socket() {
+                        // Run the main event loop while connected
+                        match main_event_loop(socket, Arc::clone(&connection_manager), &agent_mode, config_path.as_str()) {
+                            Ok(_) => {
+                                create_log_entry("main", LOG_TYPE.info.to_string(), 
+                                                "Main event loop exited normally");
+                            },
+                            Err(e) => {
+                                create_log_entry("main", LOG_TYPE.error.to_string(), 
+                                                &format!("Main event loop error: {}", e));
+                            }
+                        }
+                        
+                        // Disconnect the socket if it's still connected
+                        connection_manager.disconnect();
+                    }
+                },
                 Err(e) => {
+                    create_log_entry("main", LOG_TYPE.error.to_string(), 
+                                     &format!("Failed to connect: {}", e));
                     increment_failed_attempts();
-                    eprintln!("Failed to connect: {}. Retrying in 10 seconds...", e);
-                    thread::sleep(Duration::from_secs(10));
-                    continue;
                 }
-            };
+            }
+            
+            // Apply backoff before retrying connection
+            let backoff_duration = connection_manager.increase_backoff();
+            create_log_entry("main", LOG_TYPE.info.to_string(), 
+                             &format!("Waiting {}s before reconnection attempt", backoff_duration));
+            thread::sleep(Duration::from_secs(backoff_duration));
+        } else {
+            thread::sleep(Duration::from_secs(1));
+        }
 
         
         
         // Wait for connection to be established
-        while !connection_successful.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_secs(1));
-        }
-
-        let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
-
-        // Subscribe to room
-        if let Err(e) = socket.emit("subscribe", json!({"room": agent_id})) {
-            eprintln!("Error subscribing to room: {}", e);
-        }
-
-        // Ping management loop
-        let mut time_lapsed = 0;
-        let mut ping_sent = false;
-        let mut jump_host_service_polling_counter   = 0;
-        loop {
-
-            
-            // Check if we can send ping and it's time to do so
-            if time_lapsed >= CHECK_INTERVAL || time_lapsed == 0 {
-                time_lapsed = 0;
-                
-                // Only send ping if allowed and not already sent
-                let can_ping = *can_send_ping.lock().unwrap();
-                if can_ping && !ping_sent {
-                    println!("Sending agent_ping");
-                    if let Err(e) = socket.emit("agent_ping", json!({})) {
-                        eprintln!("Error sending agent_ping: {}", e);
-                    } else {
-                        ping_sent = true;
-                        create_log_entry("main", LOG_TYPE.info.to_string(), "Ping sent to server");
-                    }
-                }
-            }
-
-            let scheduled_time = get_config_value("scheduled_time");
-            let last_schedule_scan = get_config_value("last_schedule_scan");
-
-            
-            // Check scheduled time if applicable
-            if let Some(ref sched_time) = scheduled_time {
-                if let Ok(sched_time_parsed) = chrono::NaiveTime::parse_from_str(sched_time, "%H:%M:%S") {
-                    // Get current time in UTC timezone
-                    let now_utc = Utc::now();
-                    let now_naive_utc = now_utc.time();
-                    let todays_date = now_utc.date_naive().to_string();
-                    
-                    // For debugging
-                    create_log_entry(
-                        "main", 
-                        LOG_TYPE.info.to_string(), 
-                        &format!(
-                            "Checking scheduled scan: scheduled_time={}, current_utc_time={}, last_scan={}", 
-                            sched_time, now_naive_utc, last_schedule_scan.as_deref().unwrap_or("None")
-                        )
-                    );
-                    
-                    // Compare times directly in UTC context
-                    if (last_schedule_scan.is_none() || 
-                        last_schedule_scan.as_deref() == Some("None") || 
-                        last_schedule_scan.as_deref() != Some(&todays_date)) && 
-                        now_naive_utc >= sched_time_parsed {
-                        
-                        println!("Scheduled scan triggered at {} UTC", now_utc);
-                        create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Scheduled scan triggered at {} UTC", now_utc));
-                        
-                        initiate_local_scan();
-
-                        set_config_value("last_schedule_scan", &todays_date);
-                        let last_schedule_scan = get_config_value("last_schedule_scan");
-
-                        // Update the config file
-                        if let Ok(content) = std::fs::read_to_string(&config_path) {
-                            let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-                            let mut updated_lines = Vec::new();
-                            let mut found = false;
-                            
-                            for line in lines {
-                                if line.starts_with("last_schedule_scan=") && !found {
-                                    updated_lines.push(format!("last_schedule_scan={}", last_schedule_scan.clone().unwrap()));
-                                    found = true;
-                                } else {
-                                    updated_lines.push(line);
-                                }
-                            }
-                            
-                            let updated_content = updated_lines.join("\n") + "\n";
-                            if let Err(e) = std::fs::write(&config_path, updated_content) {
-                                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error writing to config file: {}", e));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if agent_mode == AGENT_MODE_JUMP_HOST {
-                if jump_host_service_polling_counter == 6 {
-                        if !is_secops_file_transfer_service_running(){
-                            create_log_entry("main", "ERROR".to_string(), "SecOps file transfer service not running. Initiating service.");
-                            initiate_secops_jump_host_service();
-                        } else {
-                            create_log_entry("main", "INFO".to_string(), "SecOps file transfer service running. Skipping service creation.");
-                        }
-                        jump_host_service_polling_counter = 0;
-                } else {
-                    jump_host_service_polling_counter += 1;
-                }
-            }
-
-            // Increment time and check for ping interval
-            time_lapsed += 1;
-            
-            // Check for pong timeout with precise tracking
-            let last_pong = *last_pong_received.lock().unwrap();
-            let elapsed_since_pong = last_pong.elapsed().as_secs();
-            
-            if elapsed_since_pong > PONG_TIMEOUT {
-                eprintln!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT);
-                increment_failed_attempts();
-                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT));
-                socket.disconnect();
-                break;
-            }
-
-            // Reset ping_sent if pong is received recently
-            if ping_sent && elapsed_since_pong < 5 {
-                ping_sent = false;
-            }
-
+        
             thread::sleep(Duration::from_secs(10));
         }
-    }
 }
