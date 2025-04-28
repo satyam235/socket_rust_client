@@ -5,7 +5,7 @@ use std::{env, fs, process, time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
 use reqwest::header::HeaderValue;
-use chrono::{Local, NaiveTime, Utc};
+use chrono::{format, Local, NaiveTime, Utc};
 use std::collections::HashMap;
 use chrono::{DateTime, TimeZone};
 use std::io::{Read, Write}; 
@@ -902,6 +902,9 @@ fn set_agent_mode(agent_mode: &str) {
 }
 
 fn get_jump_host_binary_file_name() -> Option<String> {
+
+    return Some("SecOpsJumpHostLinuxBinary".to_string());
+
     let ubuntu_cli_name_list: HashMap<&str, &str> = HashMap::from([
         (UBUNTU_18_OS_NAME, SECOPS_UBUNTU_18_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
         (UBUNTU_20_OS_NAME, SECOPS_UBUNTU_20_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
@@ -1131,7 +1134,7 @@ fn run_task(task_json:Value)  {
     if argument_dict.get(&operation).unwrap().get("secops_binary_config").is_some() {
 
         
-        let temp_dir = format!("{}", TEMP_DIR.as_str());
+        let temp_dir = format!("{}", SECOPS_BINARY_DIRECTORY.as_str());
 
         // Ensure secops directory exists
         if !Path::new(&temp_dir).exists() {
@@ -1182,12 +1185,19 @@ fn run_task(task_json:Value)  {
     let argument_dict_str = serde_json::to_string(&argument_dict).unwrap();
 
     // write this json to a file
-    let mut file = File::create(format!("{}\\task_config_{}.json", TEMP_DIR.as_str(), current_timestamp)).unwrap();
-    file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
+    // check if it is windows or not
+    let task_config_path = if cfg!(target_os = "windows") {
+        format!("{}\\task_config_{}.json", SECOPS_BINARY_DIRECTORY.as_str(), current_timestamp)
+    } else {
+        format!("{}/task_config_{}.json", SECOPS_BINARY_DIRECTORY.as_str(), current_timestamp)
+    };
+    
 
-    let config_path = format!("{}\\task_config_{}.json", TEMP_DIR.as_str(), current_timestamp);
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task config file created at: {}", config_path));
-    let mut command_args = vec!["-configPath", &config_path];
+    let mut file = File::create(task_config_path.clone()).unwrap();
+    file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
+    
+    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task config file created at: {}", task_config_path));
+    let mut command_args = vec!["-configPath", &task_config_path];
 
     create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Command Args: {:?}", command_args));
     // Check if the operation is "local_scan" or "local_patch_scan"
@@ -1665,6 +1675,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
 
                 if let Ok(json_data) = serde_json::from_str::<Value>(&json_str) {
+                    create_log_entry("handle_task_event", LOG_TYPE.info.to_string(), &format!("Task event received: {}", json_str));
                     if let Some(obj) = json_data[0].as_object() {
                         for (key, value) in obj {
                             let decrypted_key = decrypt_message(key);
@@ -1742,7 +1753,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .reconnect_on_disconnect(false)
             .opening_header("agentID", HeaderValue::from_str(&agent_id).unwrap())
             .on("open", move |message, client| {
-                client.emit("subscribe", json!({"room": agent_id, "version": VERSION}));
                 connection_successful_clone.store(true, Ordering::Relaxed);
                 *can_send_ping_clone.lock().unwrap() = true;
                 let mut socket_guard = current_socket_clone.lock().unwrap();
