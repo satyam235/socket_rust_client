@@ -744,6 +744,22 @@ fn prepare_working_dirs() -> bool {
         return false;
     }
 
+    if let Ok(_) = fs::create_dir_all(SECOPS_BINARY_DIRECTORY.as_str()) {
+        create_log_entry(
+            "prepare_working_dirs",
+            LOG_TYPE.info.to_string(),
+            "SECOPS Binary Directory Created"
+        );
+    } else {
+        create_log_entry(
+            "prepare_working_dirs",
+            LOG_TYPE.error.to_string(),
+            "Error Creating SECOPS Binary Directory"
+        );
+        return false;
+        
+    }
+
     if let Err(e) = fs::create_dir_all(LOGFILE_PATH.as_str()) {
         create_log_entry(
             "prepare_working_dirs",
