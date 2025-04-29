@@ -1,6 +1,6 @@
 use rsa::pkcs8::der::asn1::Null;
 use rust_socketio::{client, ClientBuilder, Payload, RawClient};
-use std::fs::{create_dir, remove_file, File};
+use std::fs::{create_dir, create_dir_all, remove_file, File};
 use std::{env, fs, process, time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
@@ -33,7 +33,7 @@ use std::process::{Command, Stdio};
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
 const CHECK_INTERVAL: u64 = 3;
 const PONG_TIMEOUT: u64 = 30;
-const VERSION: &str = "V1.0.36";
+const VERSION: &str = "V1.0.40";
 const AGENT_MODE_ENDPOINT :&str = "ENDPOINT";
 const AGENT_MODE_JUMP_HOST :&str = "JUMP_HOST";
 const AGENT_MODE :&str = AGENT_MODE_ENDPOINT;
@@ -47,8 +47,6 @@ const SECOPS_UBUNTU_22_JUMP_HOST_SERVICE_BINARY_FILE_NAME: &str = "SecOpsJumpHos
 
 static FAILED_SOCKET_CONNECTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static MAX_FAILED_SOCKET_CONNECTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(30);
-
-
 
 
 pub struct log_type {
@@ -157,6 +155,66 @@ lazy_static! {
     static ref NO_OF_KEY_SHARING_ATTEMPTS: Mutex<u32> = Mutex::new(0);
 }
 
+struct SecopsLogger;
+
+impl SecopsLogger {
+    fn info(&self, message: &str) {
+        self.log(LOG_TYPE.info.to_string(), message);
+    }
+
+    fn error(&self, message: &str) {
+        self.log(LOG_TYPE.error.to_string(), message);
+    }
+
+    fn warning(&self, message: &str) {
+        self.log(LOG_TYPE.warning.to_string(), message);
+    }
+
+    fn log(&self, log_type: String, message: &str) {
+        // Get function name from backtrace if needed
+        let function_name = "secops_service"; // Default function name
+        
+        let log_entry = LogEntry {
+            function_name: function_name.to_string(),
+            log_type: log_type.clone(),
+            message: message.to_string(),
+        };
+        append_logs_to_file(&log_entry);
+
+        let endpoint = "agent/logging";
+        let agent_id = get_config_value("A_ID").expect("Agent ID not found");
+        let base_url = get_config_value("BASE_URL").expect("Base URL not found");
+
+        let log_entry_json = json!({
+            "time": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            "message": message.to_string(),
+            "function_name": function_name.to_string(),
+            "status": "SUCCESS",
+            "log_type": log_type,
+            "agent_id": agent_id
+        });
+
+        let log_entry_str = serde_json::to_string(&log_entry_json).unwrap();
+
+        println!("Log: {}: {}", log_type, message);
+
+        let payload_data = json!({
+            "log_entry": log_entry_str
+        });
+        let payload = Some(&payload_data);
+
+        match send_request(&base_url, endpoint, None, payload, Method::POST) {
+            Ok(_) => (),
+            Err(e) => eprintln!("Failed to send log to server: {}", e),
+        }
+    }
+}
+
+// Create a global instance
+lazy_static! {
+    static ref secops_logger: SecopsLogger = SecopsLogger {};
+}
+
 fn escape_ansi(line: &str) -> String {
     lazy_static::lazy_static! {
         static ref ANSI_ESCAPE: Regex = Regex::new(r"(\x9B|\x1B\[)[0-?]*[ -/]*[@-~]").unwrap();
@@ -171,19 +229,18 @@ fn check_binary() -> Result<PathBuf, bool> {
         
         // check if binary exists
         if !binary_path.exists() {
-            create_log_entry("check_binary", LOG_TYPE.error.to_string(), &format!("Binary not found: {}", binary_path.display()));
+            secops_logger.info( &format!("Agent Binary not found: {}", binary_path.display()));
             download_secops_agent_binary("secops_cli_windows-latest.exe",TEMP_DIR.as_str(),false);
             if !binary_path.exists() {
-                create_log_entry("check_binary", LOG_TYPE.error.to_string(), &format!("Binary not found: {}", binary_path.display()));
+                secops_logger.info(&format!("Agent Binary not found: {} post download", binary_path.display()));
                 return Err(false);
             }
         }
         
-        create_log_entry( "check_binary",LOG_TYPE.info.to_string(), &format!("Using binary: {}", binary_path.display()));
+        secops_logger.info(&format!("Using agent binary: {}", binary_path.display()));
         Ok(binary_path)
     } else {
 
-        println!("Using binary directory: {}", BINARY_DIRECTORY.as_str());
         let dir_files = match fs::read_dir(BINARY_DIRECTORY.as_str()) {
             Ok(entries) => {
                 entries
@@ -217,7 +274,7 @@ fn check_binary() -> Result<PathBuf, bool> {
         };
         
         let binary_path = Path::new(BINARY_DIRECTORY.as_str()).join(binary_name.to_string());
-        create_log_entry("check_binary",LOG_TYPE.info.to_string(),&format!("Using binary: {}", binary_path.display()));
+        secops_logger.info(&format!("Using agent binary: {}", binary_path.display()));
         Ok(binary_path)
     }
 }
@@ -254,7 +311,7 @@ fn check_health() -> HashMap<String, String> {
             
             if line.contains("V") && line.contains(".") {
                 output.push(line.clone());
-                create_log_entry("check_health",LOG_TYPE.info.to_string(),&line);
+                secops_logger.info(&line);
             }
         } else {
             return Ok(fail_return);
@@ -277,7 +334,7 @@ fn check_health() -> HashMap<String, String> {
         Ok(result) => result,
         Err(ex) => {
             let err = "Exception Occurred while checking the health of the service";
-            create_log_entry("check_health", LOG_TYPE.error.to_string(), &format!("{}{}", err, ex));
+            secops_logger.error(&format!("{}{}", err, ex));
             [
                 ("status".to_string(), "FAIL".to_string()),
                 ("message".to_string(), err.to_string()),
@@ -306,7 +363,7 @@ fn check_agent_health() ->  Result<(), Box<dyn std::error::Error>> {
             Ok(())
         },
         Err(e) => {
-            create_log_entry("check_agent_health", LOG_TYPE.info.to_string(), "Agent health check failed");
+            secops_logger.error(&format!("Agent health check failed: {}", e));
             eprintln!("Request failed: {}", e);
             Err(e)
         }
@@ -323,7 +380,7 @@ fn check_jwt_status(jwt_token: String) ->  bool {
     let url = format!("{}{}", base_url, end_point);
 
     if jwt_token.is_empty() {
-        create_log_entry("check_jwt_status", LOG_TYPE.info.to_string(), "No JWT token found");
+        secops_logger.error("No JWT token found");
         return false
     } else {
         
@@ -343,19 +400,19 @@ fn check_jwt_status(jwt_token: String) ->  bool {
 
             if let Some(success) = json_response.get("success") {
                 if success.as_bool().unwrap_or(false) {
-                    create_log_entry("check_jwt_status", LOG_TYPE.info.to_string(), "JWT validation successful");
+                    secops_logger.info("JWT validation successful");
                     return true
                 } else {
-                    create_log_entry("check_jwt_status", LOG_TYPE.error.to_string(), &format!("JWT validation failed: {}", json_response.get("error").unwrap()));
+                    secops_logger.error( &format!("JWT validation failed: {}", json_response.get("error").unwrap()));
                     return false
                 }
             } else {
-                create_log_entry("check_jwt_status", LOG_TYPE.error.to_string(), &format!("JWT validation failed: {}", json_response.get("error").unwrap()));
+                secops_logger.error( &format!("JWT validation failed: {}", json_response.get("error").unwrap()));
                 return false
             }
         } else {
             println!("Request failed with status: {} url : {}", status,full_url);
-            create_log_entry("check_jwt_status", LOG_TYPE.error.to_string(), &format!("JWT validation failed: {}", response_text));
+            secops_logger.error( &format!("JWT validation failed: {}", response_text));
             return false
         }
     }
@@ -429,15 +486,8 @@ fn decrypt_message(encrypted_message: &str) -> String {
 }
 
 
-
 /// Function to make an HTTP request with GET or POST method
-fn send_request(
-    base_url: &str,
-    endpoint: &str,
-    params: Option<&[(&str, &str)]>,
-    payload: Option<&Value>,
-    method: Method
-) -> Result<Value, Box<dyn Error>> {
+fn send_request(base_url: &str, endpoint: &str, params: Option<&[(&str, &str)]>, payload: Option<&Value>, method: Method) -> Result<Value, Box<dyn Error>> {
     let client = Client::new();
     let full_url = format!("{}{}", base_url, endpoint);
     
@@ -469,7 +519,6 @@ fn send_request(
     
 }
 
-
 fn read_config(config_path: &str)  {
     let mut config = HashMap::new();
     config.insert("BASE_URL".to_string(), "https://api.app.secopsolution.com/secops/v1.0/".to_string());
@@ -489,7 +538,7 @@ fn read_config(config_path: &str)  {
 }
 
 // Function to print version
-fn print_version() {
+fn print_server_version() {
     println!("SecOps Agent Version: {}", VERSION);
 }
 
@@ -548,7 +597,7 @@ fn is_admin() -> bool {
 
 }
 
-fn initiate_local_scan() {
+fn initiate_local_vulnerability_scan() {
 
     let task = json!({
         "operation": "local_scan",
@@ -560,7 +609,7 @@ fn initiate_local_scan() {
         "full_scan": true
     });
     
-    create_log_entry("initiate_local_scan",LOG_TYPE.info.to_string(),"Initiating local vulnerability scan");
+    secops_logger.info("Initiating local vulnerability scan");
     let cli_command_json = serde_json::to_value(task).unwrap();
     run_task(cli_command_json);
 
@@ -576,7 +625,7 @@ fn initiate_local_patch_scan() {
         "user_email": "",
         "full_scan": true
     });
-    create_log_entry("initiate_local_patch_scan",LOG_TYPE.info.to_string(),"Initiating local patch scan");
+    secops_logger.info("Initiating local patch scan");
     let cli_command_json = serde_json::to_value(task).unwrap();
     run_task(cli_command_json);
 }
@@ -604,28 +653,26 @@ fn remove_config_sh() {
 }
 
 fn prepare_working_dirs() -> bool {
-    if let Err(e) = fs::create_dir_all(LOCAL_STORAGE.as_str()) {
-        create_log_entry(
-            "prepare_working_dirs",
-            LOG_TYPE.error.to_string(),
-            &format!("Error Creating Working Directories: {}", e)
-        );
-        return false;
-    }
 
-    if let Err(e) = fs::create_dir_all(LOGFILE_PATH.as_str()) {
-        create_log_entry(
-            "prepare_working_dirs",
-            LOG_TYPE.error.to_string(),
-            &format!("Error Creating Working Directories: {}", e)
-        );
-        return false;
+    let dir_list = vec![
+        LOCAL_STORAGE.as_str(),
+        SECOPS_BINARY_DIRECTORY.as_str(),
+        LOGFILE_PATH.as_str(),
+    ];
+
+    for dir in dir_list {
+        if !Path::new(dir).exists() {
+            if let Err(e) = create_dir_all(dir) {
+                secops_logger.error(&format!("Failed to create directory {}: {}", dir, e));
+                return false;
+            }
+        }
     }
 
     true
 }
 
-fn write_logs_to_file(log: &LogEntry) {
+fn append_logs_to_file(log: &LogEntry) {
     match check_log_file() {
         Some(log_file_path) => {
             let mut file = match OpenOptions::new().append(true).create(true).open(&log_file_path) {
@@ -651,44 +698,7 @@ fn write_logs_to_file(log: &LogEntry) {
     }
 }
 
-fn create_log_entry(function_name: &str, log_type: String, message: &str) {
-    let log_entry = LogEntry {
-        function_name: function_name.to_string(),
-        log_type: log_type.clone(),
-        message: message.to_string(),
-    };
-    write_logs_to_file(&log_entry);
-
-    let endpoint = "agent/logging";
-    let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
-    let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
-
-    let log_entry_json = json!({
-        "time": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        "message": message.to_string(),
-        "function_name": function_name.to_string(),
-        "status": "SUCCESS",
-        "log_type": log_type,
-        "agent_id": agent_id
-    });
-
-    let log_entry_str = serde_json::to_string(&log_entry_json).unwrap();
-
-    let payload_data = json!({
-        "log_entry" :  log_entry_str
-    });
-    let payload = Some(&payload_data);
-
-    match send_request(&base_url, endpoint, None, payload, Method::POST) {
-        Ok(response) => (),
-        Err(e) => eprintln!("Request failed: {}", e),
-    }
-
-}
-
-// Dummy function to get log file path
 fn check_log_file() -> Option<String> {
-    // return LOGFILE_PATH.to_string();
     Some(format!("{}{}{}", LOGFILE_PATH.as_str(), MAIN_SEPARATOR, LOGFILE_NAME.as_str()))
 }
 
@@ -719,11 +729,7 @@ fn generate_and_share_server_keys() -> Result<(), Box<dyn std::error::Error>> {
     let mut attempts = NO_OF_KEY_SHARING_ATTEMPTS.lock().unwrap();
     let max_attempts = *MAX_NO_OF_KEY_SHARING_ATTEMPTS.lock().unwrap();
 
-    create_log_entry(
-        "generate_and_share_server_keys",
-        LOG_TYPE.info.to_string(),
-        "Generating and sharing server keys",
-    );
+    secops_logger.info("Generating and sharing agent encryption keys");
 
     if *attempts >= max_attempts {
         println!("Max key-sharing attempts reached!");
@@ -737,39 +743,20 @@ fn generate_and_share_server_keys() -> Result<(), Box<dyn std::error::Error>> {
         match generate_key_pair() {
             Ok((private_key, public_key)) => {
 
-                create_log_entry(
-                    "generate_and_share_server_keys",
-                    LOG_TYPE.info.to_string(),
-                    "Key pair generated sucessfully",
-                );
+                secops_logger.info("Key generated sucessfully, attempting to share with backend");
 
                 match share_public_key_with_backend() {
                     Ok(_) => {
-                        println!("Public key shared successfully");
-                        create_log_entry(
-                            "generate_and_share_server_keys",
-                            LOG_TYPE.info.to_string(),
-                            "Public key shared successfully",
-                        );
+                        secops_logger.info("Key shared successfully with backend");
                         return Ok(()); // ✅ Exit function on success
                     }
                     Err(e) => {
-                        eprintln!("Failed to share public key: {}", e);
-                        create_log_entry(
-                            "generate_and_share_server_keys",
-                            LOG_TYPE.error.to_string(),
-                            &format!("Failed to share public key: {}", e),
-                        );
+                        secops_logger.error(&format!("Failed to share public key with the backend: {}", e));
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Failed to generate key pair: {}", e);
-                create_log_entry(
-                    "generate_and_share_server_keys",
-                    LOG_TYPE.error.to_string(),
-                    &format!("Failed to generate key pair: {}", e),
-                );
+                secops_logger.error(&format!("Failed to generate key pair: {}", e));
             }
         }
 
@@ -786,6 +773,8 @@ fn schedule_local_agent_scan(scheduled_time: &str) {
     let mut scheduled_time_exist_flag = false;
 
     let config_file_path = get_config_file_path();
+
+    secops_logger.info(&format!("Attempting to set schedule scan for agent at {}", scheduled_time));
     
     // Read the config file if it exists
     if Path::new(&config_file_path).exists() {
@@ -824,8 +813,9 @@ fn schedule_local_agent_scan(scheduled_time: &str) {
         set_config_value("last_schedule_scan", "None");
     }
     
-    create_log_entry("schedule_local_agent_scan",LOG_TYPE.info.to_string(),"Local scan scheduled successfully");
+    secops_logger.info("Local scan scheduled successfully");
     acknowledge_agent_configuration_setup_status("schedule_scan");
+    secops_logger.info("Acknowledged agent configuration setup status for schedule_scan");
 }
 
 fn acknowledge_agent_configuration_setup_status(config_param: &str) {
@@ -839,11 +829,10 @@ fn acknowledge_agent_configuration_setup_status(config_param: &str) {
 
     match send_request(&base_url, endpoint, None, payload, Method::POST) {
         Ok(response) => {
-            create_log_entry("acknowledge_agent_configuration_setup_status", LOG_TYPE.info.to_string(), "Configuration setup status acknowledged");
+            secops_logger.info("Configuration setup status acknowledged");
         },
         Err(e) => {
-            eprintln!("Request failed: {}", e);
-            create_log_entry("acknowledge_agent_configuration_setup_status", LOG_TYPE.error.to_string(), "Configuration setup status not acknowledged");
+            secops_logger.error(&format!("Failed to acknowledge configuration setup status: {}", e));
         },
     }
 }
@@ -884,10 +873,10 @@ fn set_agent_mode(agent_mode: &str) {
     
     if agent_mode == AGENT_MODE_JUMP_HOST {
         if !is_secops_file_transfer_service_running() {
-            create_log_entry("set_agent_mode", LOG_TYPE.info.to_string(), "Initiating SecOps jump host service");
+            secops_logger.info("Attempting to run SecOps jump host service");
             initiate_secops_jump_host_service();
         } else {
-            create_log_entry("set_agent_mode", LOG_TYPE.info.to_string(), "SecOps jump host service already running");
+            secops_logger.info("SecOps jump host service already running, no need to start it");
         }
     } else {
         if cfg!(unix) {
@@ -897,7 +886,7 @@ fn set_agent_mode(agent_mode: &str) {
         }
     }
     
-    create_log_entry("set_agent_mode",LOG_TYPE.info.to_string(),"Agent mode configured successfully.");
+    secops_logger.info("Agent mode configured successfully.");
     acknowledge_agent_configuration_setup_status("agent_mode");
 }
 
@@ -942,7 +931,7 @@ fn download_secops_agent_binary(filename :&str,download_folder:&str,run_chmod:bo
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
 
-    create_log_entry("download_secops_agent_binary", LOG_TYPE.info.to_string(), &format!("Downloading agent binary: {}", filename));
+    secops_logger.info(&format!("Attempting to download binary: {}", filename));
 
     // make the request and download the file
 
@@ -950,19 +939,19 @@ fn download_secops_agent_binary(filename :&str,download_folder:&str,run_chmod:bo
 
     if !secops_path.is_dir() {
         if secops_path.exists() {
-            create_log_entry("download_secops_agent_binary", LOG_TYPE.info.to_string(), &format!("A file named {} exists, attempting to remove it", *SECOPS_BINARY_DIRECTORY));
+            secops_logger.info(&format!("A file named {} exists, attempting to remove it", *SECOPS_BINARY_DIRECTORY));
 
             if let Err(ex) = fs::remove_file(secops_path) {
-                create_log_entry( "download_secops_agent_binary",LOG_TYPE.info.to_string(),&format!("Error removing file {}: {}", *SECOPS_BINARY_DIRECTORY, ex));
+                secops_logger.info( &format!("Error removing file {}: {}", *SECOPS_BINARY_DIRECTORY, ex));
             }
         }
 
-        create_log_entry("download_secops_agent_binary", LOG_TYPE.info.to_string(), &format!("Creating working directory {}", *SECOPS_BINARY_DIRECTORY));
+        secops_logger.info(&format!("Creating working directory {}", *SECOPS_BINARY_DIRECTORY));
         
         if let Err(ex) = fs::create_dir_all(secops_path) {
-            create_log_entry("download_secops_agent_binary", LOG_TYPE.error.to_string(), &format!("Error creating working directory {}. Exception: {}", *SECOPS_BINARY_DIRECTORY, ex));
+            secops_logger.info( &format!("Error creating working directory {}. Exception: {}", *SECOPS_BINARY_DIRECTORY, ex));
         } else {
-            create_log_entry("download_secops_agent_binary", LOG_TYPE.info.to_string(), &format!("Created working directory {}", *SECOPS_BINARY_DIRECTORY));
+            secops_logger.info(&format!("Created working directory {}", *SECOPS_BINARY_DIRECTORY));
         }
     }
 
@@ -1001,10 +990,10 @@ fn download_secops_agent_binary(filename :&str,download_folder:&str,run_chmod:bo
             }
         }
         println!("File downloaded successfully to {}", file_download_path);
-        create_log_entry("download_secops_agent_binary",LOG_TYPE.info.to_string(),&format!("File downloaded successfully to {}", file_download_path));
+        secops_logger.info(&format!("File downloaded successfully to {}", file_download_path));
     } else {
         println!("Request failed with status: {} url : {}", status,full_url);
-        create_log_entry("download_secops_agent_binary", LOG_TYPE.error.to_string(), &format!("Request failed with status: {} url : {}", status,full_url));
+        secops_logger.error(&format!("Request failed with status: {} url : {}", status,full_url));
     }
     
 }
@@ -1016,36 +1005,39 @@ fn initiate_secops_jump_host_service() {
         create_dir(&local_working_dir);
     }
     
-    create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.info.to_string(),"Initiating SecOps service");
+    secops_logger.info("Attempting to run SecOps jump host service");
 
     match get_jump_host_binary_file_name() {
         Some(binary) => {
             let binary_full_path = format!("{}{}{}",local_working_dir,MAIN_SEPARATOR,binary);
 
-            create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.info.to_string(),&format!("Checking if binary {} exists",binary_full_path));
+            secops_logger.info(&format!("Checking if binary {} exists",binary_full_path));
 
             // check if this file exists or not if download it
             if !Path::new(&binary_full_path).exists() {
+                secops_logger.info(&format!("Binary {} not found, downloading it",binary_full_path));
                 download_secops_agent_binary(&binary,&local_working_dir,true);
+            } else {
+                secops_logger.info(&format!("Binary {} found, skipping download",binary_full_path));
             }
             
-            let command_str = format!("cd {} && ./{}",local_working_dir,binary);
-            let output = Command::new("bash")
+            let command_str = format!("cd {} && ./{} &",local_working_dir,binary);
+            match Command::new("bash")
                 .arg("-c")
                 .arg(command_str)
-                .output()
-                .expect("Failed to run bash command");
-            
-            if output.status.success() {
-                println!("SecOps service started successfully.");
-                create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.info.to_string(),&format!("SecOps service started successfully."));
-            } else {
-                println!("SecOps service failed to start.");
-                create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.error.to_string(),&format!("SecOps service failed to start, error message: {}",String::from_utf8_lossy(&output.stderr)));
-            }
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn() {
+                    Ok(_) => {
+                        secops_logger.info("SecOps Jump Host service started in the background.");
+                    },
+                    Err(e) => {
+                        secops_logger.error(&format!("SecOps Jump Host service failed to start: {}", e));
+                    }
+            };
             
         },
-        None => create_log_entry("initiate_secops_jump_host_service",LOG_TYPE.error.to_string(),"Unable to find SecOps Jump host binary"),
+        None => secops_logger.error("Unable to find SecOps Jump host binary"),
     }
 
 
@@ -1060,10 +1052,9 @@ fn stop_secops_jump_host_service() {
         .stderr(Stdio::null())
         .status()
     {
-        create_log_entry("stop_secops_jump_host_service",LOG_TYPE.error.to_string(),&format!("Error while stopping SecOps service: {:?}", err));
+        secops_logger.error(&format!("Error while stopping SecOps service: {:?}", err));
     }
 }
-
 
 fn is_secops_file_transfer_service_running() -> bool {
     let host = "127.0.0.1";
@@ -1080,29 +1071,19 @@ fn run_task(task_json:Value)  {
     let base_url = get_config_value("BASE_URL").expect("Base URL not found in get_config_value");
     let cli_binary_path = check_binary().expect("Binary not found in check_binary");
 
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Attempting to run task using : {}", cli_binary_path.display()));
-
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Attempting to run task :{:?}", task_json));
-
-    // check if the file cli_binary_path exists or not if not download it
-    // if !Path::new(&cli_binary_path).exists() {
-    //     download_secops_agent_binary("secops_cli_ubuntu-20.04",TEMP_DIR.as_str(),false);
-    // }
-
+    secops_logger.info(&format!("Attempting to run task using : {}", cli_binary_path.display()));
 
     let operation = task_json["operation"].as_str().unwrap_or("").to_string();
 
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Operation : {}", operation));
-
     if operation.is_empty() {
-        create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Operation Specified");
+        secops_logger.error("No Operation Specified");
         return;
     }
 
     if operation == "schedule_local_scan"{
         let schedule_time = task_json["scheduled_time"].as_str().unwrap_or("None").to_string();
         if schedule_time.is_empty() {
-            create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Schedule Time Specified");
+            secops_logger.error("No Schedule Time Specified");
             return;
         }
         schedule_local_agent_scan(&schedule_time);
@@ -1112,12 +1093,14 @@ fn run_task(task_json:Value)  {
     if operation == "set_agent_mode" {
         let agent_mode = task_json["agent_mode"].as_str().unwrap_or("").to_string();
         if agent_mode.is_empty() {
-            create_log_entry("run_task", LOG_TYPE.error.to_string(), "No Agent Mode Specified");
+            secops_logger.error( "No Agent Mode Specified");
             return;
         }
         set_agent_mode(&agent_mode);
         return;
     }
+
+    secops_logger.info(&format!("Attempting to run operation : {} task_config:{:?}", operation, task_json));
 
     let mut argument_dict: HashMap<String, Value> = HashMap::new();
     argument_dict.insert(operation.to_string(), task_json);
@@ -1150,18 +1133,18 @@ fn run_task(task_json:Value)  {
         if let Some(secops_binary_config) = argument_dict.get_mut(&operation) {
             if let Some(secops_binary_config_value) = secops_binary_config.get("secops_binary_config") {
                 if let Some(secops_binary_config_str) = secops_binary_config_value.as_str() {
+                    
                     let secops_binary_config_json: Value =
                         serde_json::from_str(secops_binary_config_str).unwrap();
 
-                    // Write JSON to file
                     let mut file =
                         File::create(&secops_binary_config_file_path).expect("Failed to create file");
+                    
                     file.write_all(
                         serde_json::to_string_pretty(&secops_binary_config_json)
                             .unwrap()
                             .as_bytes(),
-                    )
-                    .expect("Failed to write to file");
+                    ).expect("Failed to write to file");
 
                     // Update argument_dict with file path
                     secops_binary_config.as_object_mut().unwrap().insert(
@@ -1196,12 +1179,9 @@ fn run_task(task_json:Value)  {
     let mut file = File::create(task_config_path.clone()).unwrap();
     file.write_all(argument_dict_str.as_bytes()).expect("Failed to write to task_config.json");
     
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task config file created at: {}", task_config_path));
+    secops_logger.info(&format!("Task config file created at: {}", task_config_path));
     let mut command_args = vec!["-configPath", &task_config_path];
 
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Command Args: {:?}", command_args));
-    // Check if the operation is "local_scan" or "local_patch_scan"
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("CLI Binary Path: {}", cli_binary_path.display()));
 
     // Spawn the process
     let _cli_process = Command::new(cli_binary_path)
@@ -1212,7 +1192,7 @@ fn run_task(task_json:Value)  {
         .expect("Failed to start process");
 
     // Handle the spawned process (e.g., read output)
-    create_log_entry("run_task", LOG_TYPE.info.to_string(), &format!("Task executed successfully"));
+    secops_logger.info(&format!("Task started successfully"));
 
    
 }
@@ -1254,7 +1234,7 @@ fn uninstall_agent(data: Payload) {
         }
         Payload::Text(t) => {
             // Handle text payload
-            create_log_entry("main", LOG_TYPE.info.to_string(), "Task Received for agent");
+            secops_logger.info("Uninstallation task received for agent");
 
             let mut request_json: HashMap<String, Value> = HashMap::new();
             let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
@@ -1278,35 +1258,33 @@ fn uninstall_agent(data: Payload) {
                 println!("Failed to parse JSON from text payload.");
             }
 
-            println!("Request JSON: {:#?}", request_json);
-
             let jwt_token = request_json["access_token"].as_str().unwrap_or_default();
             let agent_id = request_json["agent_id"].as_str().unwrap_or_default();
             let server_agent_id = get_config_value("A_ID").unwrap();
 
             if agent_id != server_agent_id {
-                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), &format!("Agent ID mismatch, expected: {}, received: {}", server_agent_id, agent_id));
+                secops_logger.error( &format!("Agent ID mismatch, expected: {}, received: {}", server_agent_id, agent_id));
                 return;
             }
 
             if jwt_token.is_empty() {
-                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), "No JWT token found");
+                secops_logger.error( "No JWT token found");
                 return;
             }
 
             if !check_jwt_status(jwt_token.to_string()) {
-                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), &format!("Error checking JWT token status"));
+                secops_logger.error( &format!("Error checking JWT token status"));
                 return;
             }
 
             if !check_secops_uninstaller_binary_exists() {
-                create_log_entry("uninstall_agent", LOG_TYPE.error.to_string(), "SecOps Uninstaller binary not found");
+                secops_logger.error( "SecOps Uninstaller binary not found");
                 return;
             }
 
             let secops_helper_path = format!("{}/{}", *SECOPS_BINARY_DIRECTORY, *HELPER_PROCESS_NAME);
 
-            create_log_entry("uninstall_agent", LOG_TYPE.info.to_string(), &format!("Uninstalling agent: {}", agent_id));
+            secops_logger.info( &format!("Attempting to uninstalling agent: {}", agent_id));
 
             if cfg!(target_os = "windows") {
                 // Windows: Spawn a new process without waiting for it
@@ -1329,11 +1307,13 @@ fn uninstall_agent(data: Payload) {
                 // Optional: Give it a moment to start
                 thread::sleep(Duration::from_secs(1));
             }
+
+            secops_logger.info( &format!("Uninstallation task started successfully"));
         }
     }
 }
 
-fn push_agent_updates(data: Payload) {
+fn start_agent_update(data: Payload) {
     
     match data {
 
@@ -1349,7 +1329,7 @@ fn push_agent_updates(data: Payload) {
         }
         Payload::Text(t) => {
             // Handle text payload
-            create_log_entry("main", LOG_TYPE.info.to_string(), "Task Received for agent");
+            secops_logger.info("Agent update task received");
 
             let mut request_json: HashMap<String, Value> = HashMap::new();
             let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
@@ -1366,20 +1346,18 @@ fn push_agent_updates(data: Payload) {
                             }
                         }
                     } else {
-                        println!("Failed to parse inner JSON string.");
+                        secops_logger.error( "Failed to parse inner JSON string.");
                     }
                 }
             } else {
-                println!("Failed to parse JSON from text payload.");
+                secops_logger.error( "Failed to parse JSON from text payload.");
             }
-
-            println!("Agent ID: {}", request_json["agent_id"].as_str().unwrap_or_default());
 
             let agent_id = request_json["agent_id"].as_str().unwrap_or_default();
             let server_agent_id = get_config_value("A_ID").unwrap();
 
             if agent_id != server_agent_id {
-                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), &format!("Agent ID mismatch, expected: {}, received: {}", server_agent_id, agent_id));
+                secops_logger.error( &format!("Agent ID mismatch, expected: {}, received: {}", server_agent_id, agent_id));
                 return;
             }
 
@@ -1388,22 +1366,22 @@ fn push_agent_updates(data: Payload) {
             let agent_operating_system_version = request_json["agent_operating_system_version"].as_str().unwrap_or_default();
 
             if update_type.is_empty() {
-                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "No update type found");
+                secops_logger.error("No update type found");
                 return;
             }
 
             if update_type != "Agent" && update_type != "Server" && update_type != "Both" {
-                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "Invalid update type");
+                secops_logger.error("Invalid update type");
                 return;
             }
 
             if agent_operating_system.is_empty() {
-                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "No agent operating system found");
+                secops_logger.error("No agent operating system found");
                 return;
             }
 
             if agent_operating_system_version.is_empty() {
-                create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), "No agent operating system version found");
+                secops_logger.error("No agent operating system version found");
                 return;
             }
 
@@ -1414,40 +1392,40 @@ fn push_agent_updates(data: Payload) {
             agent_os_version = agent_os_version.replace(" ", "_");
 
             if let Err(ex) = check_binary() {
-                create_log_entry("push_agent_updates",LOG_TYPE.info.to_string(),&format!("Error in check_binary: {}", ex));
+                secops_logger.error( &format!("Error in check_binary: {}", ex));
             }
 
             let secops_path = Path::new(SECOPS_BINARY_DIRECTORY.as_str());
 
             if !secops_path.is_dir() {
                 if secops_path.exists() {
-                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), &format!("A file named {} exists, attempting to remove it", *SECOPS_BINARY_DIRECTORY));
+                    secops_logger.info(&format!("A file named {} exists, attempting to remove it", *SECOPS_BINARY_DIRECTORY));
         
                     if let Err(ex) = fs::remove_file(secops_path) {
-                        create_log_entry( "push_agent_updates",LOG_TYPE.info.to_string(),&format!("Error removing file {}: {}", *SECOPS_BINARY_DIRECTORY, ex));
+                        secops_logger.error(&format!("Error removing file {}: {}", *SECOPS_BINARY_DIRECTORY, ex));
                     }
                 }
         
-                create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), &format!("Creating working directory {}", *SECOPS_BINARY_DIRECTORY));
+                secops_logger.info(&format!("Creating working directory {}", *SECOPS_BINARY_DIRECTORY));
                 
                 if let Err(ex) = fs::create_dir_all(secops_path) {
-                    create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(), &format!("Error creating working directory {}. Exception: {}", *SECOPS_BINARY_DIRECTORY, ex));
+                    secops_logger.error(&format!("Error creating working directory {}. Exception: {}", *SECOPS_BINARY_DIRECTORY, ex));
                 } else {
-                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), &format!("Created working directory {}", *SECOPS_BINARY_DIRECTORY));
+                    secops_logger.info(&format!("Created working directory {}", *SECOPS_BINARY_DIRECTORY));
                 }
             }
 
-            
-            
             let agent_os_lower = agent_os.to_lowercase();
             let update_type_lower = update_type.to_lowercase();
+
+            secops_logger.info(&format!("Attempting to run updater for agent OS: {}", agent_os_lower));
 
             if agent_os_lower.contains("windows") {
 
                 let secops_windows_updater_path = format!("{}/secops_windows_updater.exe", *INSTALL_DIR);
 
                 if Path::new(&secops_windows_updater_path).exists() {
-                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(), "Windows Updater binary found");
+                    secops_logger.info( "Windows Updater binary found");
 
                     // Launch the updater using Windows process spawning
                     let _ = std::process::Command::new(secops_windows_updater_path)
@@ -1459,13 +1437,13 @@ fn push_agent_updates(data: Payload) {
                         .expect("Failed to launch Windows Updater");
 
                 } else {
-                    create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(),"Windows Updater not found");
+                    secops_logger.error("Windows Updater not found");
                 }
             } else {
                 let secops_linux_updater_path = format!("{}/secops_linux_updater", *INSTALL_DIR);
 
                 if Path::new(&secops_linux_updater_path).exists() {
-                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(),"Linux Updater binary found");
+                    secops_logger.info("Linux Updater binary found");
 
                     // Run the Linux updater with sudo and launch it in a new session
                     let _ = Command::new("sudo")
@@ -1479,19 +1457,19 @@ fn push_agent_updates(data: Payload) {
                         .spawn()
                         .expect("Failed to launch Linux Updater");
 
-                    create_log_entry("push_agent_updates", LOG_TYPE.info.to_string(),"Linux Updater started");
+                    secops_logger.info("Linux Updater started");
 
                 } else {
-                    create_log_entry("push_agent_updates", LOG_TYPE.error.to_string(),"Linux Updater not found");
+                    secops_logger.error( "Linux Updater not found");
                 }
             }
 
+            secops_logger.info(&format!("Agent updater started for agent OS: {}", agent_os_lower));
+
             if update_type_lower.contains("both") {
+                secops_logger.info("Both update types selected, exiting.");
                 std::process::exit(0);
             }
-            
-                
-            
 
         }
     }
@@ -1508,9 +1486,10 @@ fn increment_failed_attempts() {
     FAILED_SOCKET_CONNECTION_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
 
     if get_failed_attempts() >= get_max_failed_attempts() {
-        println!("Max failed socket connection attempts ({}) reached. Taking action...", get_failed_attempts());
-        create_log_entry("increment_failed_attempts", LOG_TYPE.error.to_string(), "Max failed socket connection attempts reached. Restarting Service ...");
+        secops_logger.info("Max failed socket connection attempts reached. Restarting Service ...");
         restart_secops_service();
+    } else {
+        secops_logger.info(&format!("Failed socket connection attempts: {}", get_failed_attempts()));
     }
 }
 
@@ -1532,7 +1511,7 @@ fn set_max_failed_attempts(value: usize) {
 fn restart_secops_service() {
     let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
 
-    create_log_entry("restart_secops_service", LOG_TYPE.info.to_string(), "Restarting SecopsService");
+    secops_logger.info("Attempting to restart SecopsService");
 
     let os_name = env::consts::OS;
 
@@ -1561,7 +1540,7 @@ fn restart_secops_service() {
             .spawn() // Spawns an independent process
 
             {
-                create_log_entry("restart_secops_service", LOG_TYPE.error.to_string(), "Error restarting service, please restart manually");    
+                secops_logger.error("Error restarting service, please restart manually");    
             }
         }
     } else {
@@ -1578,10 +1557,10 @@ fn restart_secops_service() {
 
             match service_restart {
                 Ok(status) if status.success() => {
-                   create_log_entry("restart_secops_service", LOG_TYPE.info.to_string(), "Service restarted");
+                   secops_logger.info( "Service restarted");
                 }
                 _ => {
-                    create_log_entry("restart_secops_service", LOG_TYPE.error.to_string(), "Error restarting service, please restart manually");
+                    secops_logger.error("Error restarting service, please restart manually");
                 }
             }
         } else {
@@ -1595,10 +1574,10 @@ fn restart_secops_service() {
 
             match service_restart {
                 Ok(status) if status.success() => {
-                    create_log_entry("restart_secops_service", LOG_TYPE.info.to_string(), "Service restarted");
+                    secops_logger.info( "Service restarted");
                 }
                 _ => {
-                    create_log_entry("restart_secops_service", LOG_TYPE.error.to_string(), "Error restarting service, please restart manually");
+                    secops_logger.error("Error restarting service, please restart manually");
                 }
             }
         }
@@ -1606,7 +1585,7 @@ fn restart_secops_service() {
 }
 
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     if cfg!(target_os = "windows") {
         if !is_elevated() {
@@ -1624,7 +1603,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check for version flag
     if args.contains(&"-V".to_string()) || args.contains(&"--version".to_string()) {
-        print_version();
+        print_server_version();
         process::exit(0);
     }
 
@@ -1635,7 +1614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     prepare_working_dirs();
 
-    create_log_entry("main", LOG_TYPE.info.to_string(), "SecOps Agent Service Started");
+    secops_logger.info("SecOps Agent Service Started");
 
     let agent_id = get_config_value("A_ID").expect("Agent ID not found in get_config_value");
     let base_url: String = get_config_value("BASE_URL").unwrap();
@@ -1643,7 +1622,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secops_jump_host: bool = get_config_value("secops_jump_host").map_or(false, |v| v == "true");
 
     if agent_id.is_empty() {
-        create_log_entry("main", LOG_TYPE.info.to_string(), "Agent ID not found");
+        secops_logger.error("Agent ID not found");
         process::exit(1);
     }
 
@@ -1657,8 +1636,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     generate_and_share_server_keys();
 
     let handle_task_event = move |message: Payload, _| {
-
-        create_log_entry("main", LOG_TYPE.info.to_string(), "Task event received");
         
         match message {
             Payload::String(s) => {
@@ -1675,7 +1652,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let json_str = serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string());
 
                 if let Ok(json_data) = serde_json::from_str::<Value>(&json_str) {
-                    create_log_entry("handle_task_event", LOG_TYPE.info.to_string(), &format!("Task event received: {}", json_str));
                     if let Some(obj) = json_data[0].as_object() {
                         for (key, value) in obj {
                             let decrypted_key = decrypt_message(key);
@@ -1690,7 +1666,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 } else {
                     println!("Failed to parse JSON from text payload.");
-                    create_log_entry("handle_task_event", LOG_TYPE.error.to_string(), "message failed to parse json");
+                    secops_logger.info("message failed to parse json");
                 }
 
                 let cli_command_json = serde_json::to_value(cli_command).unwrap();
@@ -1727,21 +1703,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         let url = format!("http://172.28.181.199:5678");
 
-        create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Connecting to the websocket server at {}", url));
+        secops_logger.info(&format!("Connecting to the websocket server at {}", url));
         
         let current_socket: Arc<Mutex<Option<RawClient>>> = Arc::new(Mutex::new(None));
         let current_socket_clone = Arc::clone(&current_socket);
 
         // Shared state for connection and last pong
         let connection_successful = Arc::new(AtomicBool::new(false));
-        let connection_successful_clone = Arc::clone(&connection_successful);
         
         let last_pong_received = Arc::new(Mutex::new(Instant::now()));
-        let last_pong_received_clone = Arc::clone(&last_pong_received);
         
-        // Flag to control ping sending
-        let can_send_ping = Arc::new(Mutex::new(false));
-        let can_send_ping_clone = Arc::clone(&can_send_ping);
+
 
         if let Some(prev_socket) = current_socket.lock().unwrap().take() {
             prev_socket.disconnect();
@@ -1752,19 +1724,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .reconnect(false)
             .reconnect_on_disconnect(false)
             .opening_header("agentID", HeaderValue::from_str(&agent_id).unwrap())
-            .on("open", move |message, client| {
-                connection_successful_clone.store(true, Ordering::Relaxed);
-                *can_send_ping_clone.lock().unwrap() = true;
-                let mut socket_guard = current_socket_clone.lock().unwrap();
-                *socket_guard = Some(client.clone());
-                create_log_entry("main", LOG_TYPE.info.to_string(), "Connected to the websocket server");
-                reset_failed_attempts();
+            .on("open", {
+                let connection_successful_clone = Arc::clone(&connection_successful);
+                let current_socket_clone = Arc::clone(&current_socket_clone);
+                move |message, client| {
+                    connection_successful_clone.store(true, Ordering::Relaxed);
+                    let mut socket_guard = current_socket_clone.lock().unwrap();
+                    *socket_guard = Some(client.clone());
+                    secops_logger.info("Connected to the websocket server");
+                    reset_failed_attempts();
+                }
             })
-            .on("agent_pong", move |data, _| {   
-                let mut last_pong = last_pong_received_clone.lock().unwrap();
-                *last_pong = Instant::now();
-                println!("Agent pong received and timestamp updated to {:?}", last_pong);
-
+            .on("agent_pong", {
+                let last_pong_received_clone = Arc::clone(&last_pong_received);
+                move |data, _| {   
+                    let mut last_pong = last_pong_received_clone.lock().unwrap();
+                    *last_pong = Instant::now();
+                    secops_logger.info("Received Heartbeat from server");
+                }
             })            
             .on("task", handle_task_event)
             .on("health_check", move |_, _| {
@@ -1774,19 +1751,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 uninstall_agent(data);
             })
             .on("push_updates", move |data, _| {
-                push_agent_updates(data);
-            })
-            .on("error", move |data, _| {
-                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error connecting to the websocket server, error: {:#?}", data));
-                increment_failed_attempts();
+                start_agent_update(data);
             })
             .on("close", {
                 let current_socket_clone = Arc::clone(&current_socket);
+                let connection_successful_clone = Arc::clone(&connection_successful);
+                let last_pong_received_clone = Arc::clone(&last_pong_received);
                 move |data, _| {
-                    create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Connection to the websocket server closed, error: {:#?}", data));
+                    secops_logger.error( &format!("Connection to the websocket server closed, error: {:#?}", data));
                     increment_failed_attempts();
                     let mut socket_guard = current_socket_clone.lock().unwrap();
                     *socket_guard = None;
+                    secops_logger.info( "Attempting to reconnect...");
+                    connection_successful_clone.store(false, Ordering::Relaxed);
+
+                    // Reset the last pong received time
+                    let mut last_pong = last_pong_received_clone.lock().unwrap();
+                    *last_pong = Instant::now();
                 }
             })
             .connect()
@@ -1803,7 +1784,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     increment_failed_attempts();
                     eprintln!("Failed to connect: {}. Retrying in 10 seconds...", e);
                     thread::sleep(Duration::from_secs(10));
-                    continue;
+                    continue; // Retry connection
                 }
             };
 
@@ -1827,21 +1808,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut jump_host_service_polling_counter   = 0;
         loop {
 
+            // check if connection_successful is set to false if so disconnect and attempt to reconnect
+            if !connection_successful.load(Ordering::Relaxed) {
+                secops_logger.error("Websocket disconnected, attempting to reconnect ...");
+                socket.disconnect();
+                break;
+            }
             
             // Check if we can send ping and it's time to do so
             if time_lapsed >= CHECK_INTERVAL || time_lapsed == 0 {
                 time_lapsed = 0;
                 
-                // Only send ping if allowed and not already sent
-                let can_ping = *can_send_ping.lock().unwrap();
-                if can_ping && !ping_sent {
-                    println!("Sending agent_ping");
+
+                if !connection_successful.load(Ordering::Relaxed) {
+                    secops_logger.error( "Websocket disconnected, attempting to reconnect ...");
+                    socket.disconnect();
+                    break;
+                }
+                
+                // Send ping
+                if !ping_sent {
                     if let Err(e) = socket.emit("agent_ping", json!({})) {
-                        eprintln!("Error sending agent_ping: {}", e);
+                        ping_sent = true;
+                        secops_logger.error(&format!("Error sending heartbeat to server: {}", e));
                     } else {
                         ping_sent = true;
-                        create_log_entry("main", LOG_TYPE.info.to_string(), "Ping sent to server");
+                        secops_logger.info("Heartbeat sent to server");
                     }
+                    
                 }
             }
 
@@ -1858,14 +1852,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let todays_date = now_utc.date_naive().to_string();
                     
                     // For debugging
-                    create_log_entry(
-                        "main", 
-                        LOG_TYPE.info.to_string(), 
-                        &format!(
-                            "Checking scheduled scan: scheduled_time={}, current_utc_time={}, last_scan={}", 
-                            sched_time, now_naive_utc, last_schedule_scan.as_deref().unwrap_or("None")
-                        )
-                    );
+                    secops_logger.info(&format!("Checking scheduled scan: scheduled_time={}, current_utc_time={}, last_scan={}", sched_time, now_naive_utc, last_schedule_scan.as_deref().unwrap_or("None")));
                     
                     // Compare times directly in UTC context
                     if (last_schedule_scan.is_none() || 
@@ -1874,9 +1861,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         now_naive_utc >= sched_time_parsed {
                         
                         println!("Scheduled scan triggered at {} UTC", now_utc);
-                        create_log_entry("main", LOG_TYPE.info.to_string(), &format!("Scheduled scan triggered at {} UTC", now_utc));
+                        secops_logger.info(&format!("Scheduled scan triggered at {} UTC", now_utc));
                         
-                        initiate_local_scan();
+                        initiate_local_vulnerability_scan();
 
                         set_config_value("last_schedule_scan", &todays_date);
                         let last_schedule_scan = get_config_value("last_schedule_scan");
@@ -1898,7 +1885,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             let updated_content = updated_lines.join("\n") + "\n";
                             if let Err(e) = std::fs::write(&config_path, updated_content) {
-                                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("Error writing to config file: {}", e));
+                                secops_logger.error(&format!("Error writing to config file: {}", e));
                             }
                         }
                     }
@@ -1908,10 +1895,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if agent_mode == AGENT_MODE_JUMP_HOST {
                 if jump_host_service_polling_counter == 6 {
                         if !is_secops_file_transfer_service_running(){
-                            create_log_entry("main", "ERROR".to_string(), "SecOps file transfer service not running. Initiating service.");
+                            secops_logger.info( "SecOps file transfer service not running. Initiating service.");
                             initiate_secops_jump_host_service();
                         } else {
-                            create_log_entry("main", "INFO".to_string(), "SecOps file transfer service running. Skipping service creation.");
+                            secops_logger.info("SecOps file transfer service running. Skipping service creation.");
                         }
                         jump_host_service_polling_counter = 0;
                 } else {
@@ -1927,9 +1914,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed_since_pong = last_pong.elapsed().as_secs();
             
             if elapsed_since_pong > PONG_TIMEOUT {
-                eprintln!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT);
                 increment_failed_attempts();
-                create_log_entry("main", LOG_TYPE.error.to_string(), &format!("No pong received in {} seconds. Reconnecting...", PONG_TIMEOUT));
+                secops_logger.error(&format!("No Heartbeat received in {} seconds. Attempting a create fresh connection ...", PONG_TIMEOUT));
                 socket.disconnect();
                 break;
             }
@@ -1942,4 +1928,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             thread::sleep(Duration::from_secs(10));
         }
     }
+}
+
+
+
+// Actual execution wrapped in a closure to handle any unexpected exits
+pub fn actual_main() -> Result<(), Box<dyn std::error::Error>> {
+    // Move original main code here to wrap it with panic and exit handling
+    match std::panic::catch_unwind(|| run_server()) {
+        Ok(result) => {
+            if let Err(e) = result {
+                secops_logger.error(&format!("Main function returned error: {}", e));
+                restart_secops_service();
+            }
+            Ok(())
+        },
+        Err(_) => {
+            secops_logger.error("Process panicked outside of panic handler");
+            restart_secops_service();
+            Ok(())
+        }
+    }
+}
+
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    actual_main()
 }
