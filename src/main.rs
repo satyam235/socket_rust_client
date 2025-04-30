@@ -29,7 +29,6 @@ use regex::Regex;
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 
-
 const CONFIG_PATH: &str = "/usr/local/bin/secops_config.txt";
 const CHECK_INTERVAL: u64 = 3;
 const PONG_TIMEOUT: u64 = 30;
@@ -451,7 +450,7 @@ fn decrypt_message(encrypted_message: &str) -> String {
     let private_key = match private_key_guard.as_ref() {
         Some(key) => key,
         None => {
-            eprintln!("Error: Private key not found");
+            secops_logger.error("Error: Private key not found");
             return "Error: Private key not found".to_string();
         }
     };
@@ -463,24 +462,24 @@ fn decrypt_message(encrypted_message: &str) -> String {
     let encrypted_data = match base64::decode(encrypted_message.trim()) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("Error: Failed to decode Base64 -> {}", e);
-            return format!("Error: Failed to decode Base64 -> {}", e);
+            secops_logger.error(&format!("Error: Failed to decode Base64 -> {}", e));
+            return "".to_string();
         }
     };
 
     let decrypted_data = match private_key.decrypt(Oaep::new::<Sha256>(), &encrypted_data) {
         Ok(data) => data,
         Err(_) => {
-            eprintln!("Error: Decryption failed");
-            return "Error: Decryption failed".to_string();
+            secops_logger.error("Error: Decryption failed");
+            return "".to_string();
         }
     };
 
     match String::from_utf8(decrypted_data) {
         Ok(decoded_str) => decoded_str,
         Err(_) => {
-            eprintln!("Error: Failed to convert decrypted data to UTF-8");
-            "Error: Failed to convert decrypted data to UTF-8".to_string()
+            secops_logger.error("Error: Failed to convert decrypted data to UTF-8");
+            return "".to_string();
         }
     }
 }
@@ -1072,6 +1071,8 @@ fn run_task(task_json:Value)  {
     let cli_binary_path = check_binary().expect("Binary not found in check_binary");
 
     secops_logger.info(&format!("Attempting to run task using : {}", cli_binary_path.display()));
+
+    secops_logger.info(&format!("Task JSON: {:?}", task_json));
 
     let operation = task_json["operation"].as_str().unwrap_or("").to_string();
 
