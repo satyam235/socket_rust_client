@@ -1013,27 +1013,27 @@ fn get_jump_host_binary_file_name() -> Option<String> {
 
     return Some("SecOpsJumpHostLinuxBinary".to_string());
 
-    let ubuntu_cli_name_list: HashMap<&str, &str> = HashMap::from([
-        (UBUNTU_18_OS_NAME, SECOPS_UBUNTU_18_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
-        (UBUNTU_20_OS_NAME, SECOPS_UBUNTU_20_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
-        (UBUNTU_22_OS_NAME, SECOPS_UBUNTU_22_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
-    ]);
+    // let ubuntu_cli_name_list: HashMap<&str, &str> = HashMap::from([
+    //     (UBUNTU_18_OS_NAME, SECOPS_UBUNTU_18_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
+    //     (UBUNTU_20_OS_NAME, SECOPS_UBUNTU_20_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
+    //     (UBUNTU_22_OS_NAME, SECOPS_UBUNTU_22_JUMP_HOST_SERVICE_BINARY_FILE_NAME),
+    // ]);
 
-    let current_dir = INSTALL_DIR.as_str();
+    // let current_dir = INSTALL_DIR.as_str();
 
-    if let Ok(entries) = fs::read_dir(current_dir) {
-        for entry in entries.flatten() {
-            if let Some(file_name) = entry.file_name().to_str() {
-                for (cli_name, binary_name) in &ubuntu_cli_name_list {
-                    if file_name.contains(cli_name) {
-                        return Some(binary_name.to_string());
-                    }
-                }
-            }
-        }
-    }
+    // if let Ok(entries) = fs::read_dir(current_dir) {
+    //     for entry in entries.flatten() {
+    //         if let Some(file_name) = entry.file_name().to_str() {
+    //             for (cli_name, binary_name) in &ubuntu_cli_name_list {
+    //                 if file_name.contains(cli_name) {
+    //                     return Some(binary_name.to_string());
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
-    None
+    // None
 }
 
 fn download_secops_agent_binary(filename :&str,download_folder:&str,run_chmod:bool) {
