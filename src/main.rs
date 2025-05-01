@@ -763,7 +763,7 @@ fn prepare_working_dirs() -> bool {
 }
 
 fn append_logs_to_file(log: &LogEntry) {
-    fmt.println!("Log: {}: {}", log.log_type, log.message);
+    println!("Log: {}: {}", log.log_type, log.message);
     match check_log_file() {
         Some(log_file_path) => {
             let mut file = match OpenOptions::new().append(true).create(true).open(&log_file_path) {
