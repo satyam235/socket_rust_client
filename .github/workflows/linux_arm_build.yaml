@@ -68,10 +68,18 @@ jobs:
           cd target/aarch64-unknown-linux-musl/release
           strip socketio_example
           chmod +x socketio_example
-          tar -czvf socketio_example-linux-aarch64.tar.gz socketio_example
+          mv socketio_example secops_cli_linux_aarch64
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
         with:
-          name: socketio_example-linux-aarch64
-          path: target/aarch64-unknown-linux-musl/release/socketio_example-linux-aarch64.tar.gz
+          tag_name: latest
+          name: Latest Linux Build
+          files: target/aarch64-unknown-linux-musl/release/secops_cli_linux_aarch64
+          draft: false
+          prerelease: false
+          body: |
+            Latest Linux build from main branch
+            Built on: ${{ github.event.head_commit.timestamp }}
+            Commit: ${{ github.sha }}
