@@ -392,7 +392,7 @@ fn check_agent_health() ->  Result<(), Box<dyn std::error::Error>> {
 
     let json_payload = json!({
         "agent_id": agent_id,
-        "version": health_check_response.get("version").unwrap_or(&Value::String("Unknown".to_string())),
+        "version": health_check_response.get("version").map(|v| Value::String(v.clone())).unwrap_or(Value::String("Unknown".to_string())),
         "server_version": VERSION,
         "status": health_check_response
     });
@@ -400,6 +400,7 @@ fn check_agent_health() ->  Result<(), Box<dyn std::error::Error>> {
 
     match send_request(base_url.as_str(), end_point, None, payload, Method::POST) {
         Ok(response) => {
+            secops_logger.info("Agent health check uploaded successfully");
             Ok(())
         },
         Err(e) => {
@@ -501,7 +502,7 @@ fn generate_key_pair() -> Result<(RsaPrivateKey, RsaPublicKey), Box<dyn std::err
 }
 
 fn get_public_key_pem() -> Option<String> {
-    SERVER_PUBLIC KEY.lock().unwrap().as_ref().map(|key| {
+    SERVER_PUBLIC_KEY.lock().unwrap().as_ref().map(|key| {
         match key.to_public_key_pem(rsa::pkcs8::LineEnding::LF) {
             Ok(pem) => pem,
             Err(e) => {
