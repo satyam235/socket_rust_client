@@ -3,6 +3,8 @@ name: Build Linux x86_64
 on: [push, pull_request]
 
 jobs:
+  permissions:
+    contents: write
   linux-x86_64:
     runs-on: ubuntu-latest
     steps:

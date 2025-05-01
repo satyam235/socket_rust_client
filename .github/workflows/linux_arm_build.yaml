@@ -3,6 +3,8 @@ name: Build Linux ARM (aarch64)
 on: [push, pull_request]
 
 jobs:
+  permissions:
+    contents: write
   linux-aarch64:
     runs-on: ubuntu-24.04-arm
     steps:

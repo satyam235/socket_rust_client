@@ -3,6 +3,8 @@ name: Build macOS ARM & Intel
 on: [push, pull_request]
 
 jobs:
+  permissions:
+    contents: write
   mac-arm64:
     runs-on: macos-14  # Ensure this runner is set up for Apple Silicon (ARM64)
     steps:
