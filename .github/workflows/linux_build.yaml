@@ -1,12 +1,15 @@
-name: Build Linux x86_64
+name: Build Linux CLI
+# This workflow builds the Linux CLI for both x86_64 and aarch64 architectures
+# and creates a release on GitHub with the built binaries.
 
 on: [push, pull_request]
 
 jobs:
-  permissions:
-    contents: write
+
   linux-x86_64:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       
@@ -68,6 +71,89 @@ jobs:
           tag_name: latest
           name: Latest Linux Build
           files: target/x86_64-unknown-linux-musl/release/secops_cli_linux_x86_64
+          draft: false
+          prerelease: false
+          body: |
+            Latest Linux build from main branch
+            Built on: ${{ github.event.head_commit.timestamp }}
+            Commit: ${{ github.sha }}
+
+  linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name : check os and arch
+        run: |
+          uname -a
+          uname -m
+
+      - name: Install system dependencies 
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            musl-tools \
+            musl-dev \
+            libssl-dev \
+            pkg-config \
+            wget \
+            build-essential \
+            linux-libc-dev \
+            linux-headers-$(uname -r) \
+            gcc-aarch64-linux-gnu \
+            gcc \
+            g++ \
+            make \
+            crossbuild-essential-arm64
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: aarch64-unknown-linux-musl
+          default: true
+
+      - name: Download and Compile OpenSSL for musl
+        run: |
+          wget https://www.openssl.org/source/openssl-1.1.1e.tar.gz
+          tar zxf openssl-1.1.1e.tar.gz
+          cd openssl-1.1.1e
+
+          ./Configure linux-aarch64 --prefix=/opt/openssl-1.1.1e --openssldir=/opt/openssl-1.1.1e -static
+          make -j$(nproc)
+          make install
+
+          file /opt/openssl-1.1.1e/bin/openssl
+
+      - name: Build binary
+        run: |
+          cargo build --release --target aarch64-unknown-linux-musl
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          OPENSSL_STATIC: 1
+          OPENSSL_DIR: /usr/local/musl
+          OPENSSL_INCLUDE_DIR: /usr/local/musl/include
+          OPENSSL_LIB_DIR: /usr/local/musl/lib
+          PKG_CONFIG_ALLOW_CROSS: 1
+          PKG_CONFIG_PATH: /usr/local/musl/lib/pkgconfig
+
+      - name: Optimize and package binary
+        run: |
+          cd target/aarch64-unknown-linux-musl/release
+          strip socketio_example
+          chmod +x socketio_example
+          mv socketio_example secops_cli_linux_aarch64
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          name: Latest Linux Build
+          files: target/aarch64-unknown-linux-musl/release/secops_cli_linux_aarch64
           draft: false
           prerelease: false
           body: |
